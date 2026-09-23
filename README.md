@@ -10,9 +10,9 @@ Nothing in the code is client-specific: every client detail lives in a YAML
 config file.
 
 > **Status:** v1 in progress. Built so far: config validation, URL
-> normalization, link-region extraction, and every path metric, proven
-> against a fixture site (`tests/fixtures/site/README.md` lists its expected
-> numbers). Coming next: the headed crawler and reports.
+> normalization, every path metric, and the headed crawler with operator
+> prompts. Every stage is proven against a fixture site; see [Test gates](#test-gates).
+> Coming next: reports (`report.md`, `report.json`, GraphML, Mermaid).
 
 ## Setup
 
@@ -28,14 +28,77 @@ pytest
 ## Usage
 
 ```bash
-pathcrawl validate --config configs/ups.yaml
-pathcrawl selftest
+pathcrawl validate --config configs/ups.yaml                  # check a config
+pathcrawl crawl    --config configs/ups.yaml --campaign tl-2026-q3-01
+pathcrawl analyze  --run runs/ups/tl-2026-q3-01/<timestamp>   # every metric -> analysis.json
+pathcrawl selftest                                            # the test gate (see below)
 ```
 
 `validate` either prints a summary of the config or lists every problem with
 its location in the file (for example `crawl.max_dept: Extra inputs are not
 permitted`). It also warns about things that are valid but probably wrong, such
-as leftover `REPLACE-ME` placeholders.
+as leftover `REPLACE-ME` placeholders. `crawl` refuses to start while any
+placeholders remain.
+
+### Crawling
+
+`crawl` opens a visible Chromium window, slowed down (`slow_mo_ms`) so people
+can watch it. It starts from the campaign's entry links and works outward
+breadth-first: every page one click away, then two clicks, and so on, up to
+`max_depth` clicks and `max_pages` pages. A small badge in the corner of the
+browser shows the depth and page count. The terminal prints one line per page:
+its depth, HTTP status, load time, links found, and **WIN** when it hits the
+win page.
+
+What it records for each page: the requested and final URL and redirect chain,
+the HTTP status and load time, title, meta description, the H1-H6 outline,
+the full visible text, the canonical tag, JSON-LD types, whether the win form
+rendered, a full-page screenshot, and every link with its anchor text and
+region (nav, header, footer or body). It also fetches each page without
+JavaScript and flags pages whose content only appears after scripts run.
+
+Options:
+
+| flag | effect |
+|---|---|
+| `--headless` | no visible browser |
+| `--non-interactive` | never pause: accept pages that loaded, skip pages that failed |
+| `--resume RUN_DIR` | continue a run that was quit or crashed |
+| `--runs-dir DIR` | where run directories go (default `runs/`) |
+
+**When it gets stuck, it asks you.** It pauses on a block, CAPTCHA, 403 or
+429, on a timeout or navigation error (after one automatic retry in a fresh
+tab), on an entry link that redirects off the allowed domains, on a page with
+no links it can follow, and on a cookie banner it couldn't dismiss:
+
+```
+[r] retry   [s] skip this page   [u] enter a URL to continue to   [w] mark this page as a win   [q] save and quit
+```
+
+- `u` records an **operator edge**: a jump that you made, not a link on the
+  site. Operator edges are flagged separately in every metric, because a real
+  visitor couldn't make that jump.
+- `w` marks the page as a win (flagged as operator-marked).
+- `q` saves everything. `pathcrawl crawl --resume <run dir>` picks up where
+  the crawl stopped. A crash is equally safe: each page is saved the moment
+  it's crawled.
+
+**Hard rules.** The crawler only ever loads URLs on the allowed domains that
+pass the locale filters. It never clicks links: it loads their URLs directly.
+The only thing it clicks is a cookie-consent button. It never fills in or
+submits a form and never logs in. It obeys robots.txt (unless
+`respect_robots: false`) and waits `delay_ms` between pages.
+
+### Run directory
+
+Each crawl writes to `runs/<client>/<campaign>/<timestamp>/`:
+
+| file | contents |
+|---|---|
+| `config.yaml` | the exact config the run used (resume reads this) |
+| `crawl.db` | SQLite: pages, links, redirects, queue, operator actions |
+| `screenshots/` | one full-page JPEG per page |
+| `analysis.json` | every metric, written by `pathcrawl analyze` |
 
 ## Test gates
 
@@ -45,8 +108,14 @@ yourself; CI runs the same ones on every pull request
 
 ```bash
 pytest                    # unit tests
-pathcrawl selftest        # expected vs actual for every metric, on the fixture site
+pathcrawl selftest            # expected vs actual for every metric, on the fixture site
+pathcrawl selftest --headed   # same, and watch the browser crawl it
 ```
+
+The browser tests and the `crawl` stage need Chromium (`playwright install
+chromium`). If Playwright's own browser can't be installed, point
+`PATHCRAWL_CHROMIUM` at a Chromium executable. Locally, browser tests are
+skipped with a reason when Chromium is missing; CI requires them.
 
 `pathcrawl selftest` runs every stage built so far against the fixture site in
 `tests/fixtures/site/` and prints one row per metric with a ✓ or ✗, comparing
@@ -56,7 +125,7 @@ It exits non-zero if anything differs.
 | stage | what it proves | added in |
 |---|---|---|
 | `graph` | link extraction and every path metric, reading the fixture HTML directly | step 2 |
-| `crawl` | the real browser crawl of the fixture site produces the same graph and numbers | step 3 |
+| `crawl` | a real headless-browser crawl of the served fixture site reproduces the same numbers (`--headed` to watch it) | step 3 |
 | `report` | report files are written, and their numbers match the analysis | step 4 |
 
 To see the fixture site the numbers describe, serve it and click around:
