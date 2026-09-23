@@ -8,11 +8,20 @@ runs in pytest and CI.
 Stages:
 - ``graph``: read the fixture HTML files directly, extract links, build the
   graph and run every metric. No browser needed.
+- ``crawl``: serve the fixture site on localhost, crawl it with the real
+  browser crawler, rebuild the graph from the crawl database, and check the
+  same numbers. This is the end-to-end gate.
 """
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import tempfile
+import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -146,3 +155,51 @@ def run_graph_stage(site: Path = FIXTURE_SITE) -> list[Check]:
     analysis = analyze(g, entry_points(cfg), max_depth=expected["max_depth"])
     crawled = sum(1 for _, d in g.nodes(data=True) if d["explored"])
     return compare(analysis, expected, FIXTURE_BASE, "graph", crawled)
+
+
+# --------------------------------------------------------------------------- crawl stage
+
+
+class _QuietHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002 - signature fixed by the base class
+        pass
+
+
+@contextlib.contextmanager
+def serve_directory(directory: Path) -> Iterator[str]:
+    """Serve ``directory`` on a free localhost port; yields the base URL."""
+    handler = functools.partial(_QuietHandler, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def run_crawl_stage(site: Path = FIXTURE_SITE, headed: bool = False, run_dir: Path | None = None, console=None) -> list[Check]:
+    """Stage 'crawl': the real crawler against the served fixture site."""
+    from rich.console import Console
+
+    from pathcrawl.crawler import Crawler, NonInteractiveOperator
+    from pathcrawl.graph import graph_from_store
+
+    expected = load_expected(site)
+    with serve_directory(site) as base, contextlib.ExitStack() as stack:
+        if run_dir is None:
+            run_dir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="pathcrawl-selftest-")))
+        cfg = fixture_config(base, expected["entries"])
+        cfg.crawl.delay_ms = 0
+        cfg.crawl.slow_mo_ms = 250 if headed else 0
+        crawler = Crawler(
+            cfg, cfg.campaigns[0], run_dir, NonInteractiveOperator(),
+            console=console or Console(quiet=True), headed=headed,
+        )
+        crawler.run()
+        g, entries = graph_from_store(crawler.store)
+        crawled = crawler.store.explored_count()
+        crawler.store.close()
+        analysis = analyze(g, entries, max_depth=expected["max_depth"])
+        return compare(analysis, expected, base, "crawl", crawled)

@@ -29,3 +29,4 @@ include = ["pathcrawl*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["browser: needs Chromium (skipped locally if unavailable; required in CI)"]

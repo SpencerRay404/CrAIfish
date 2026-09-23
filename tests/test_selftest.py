@@ -2,6 +2,7 @@
 
 import copy
 
+import pytest
 from typer.testing import CliRunner
 
 from pathcrawl.cli import app
@@ -13,6 +14,7 @@ from pathcrawl.selftest import (
     fixture_config,
     graph_from_html_files,
     load_expected,
+    run_crawl_stage,
     run_graph_stage,
 )
 
@@ -41,6 +43,15 @@ def test_gate_catches_a_wrong_number():
 
 
 def test_cli_selftest_passes():
-    result = CliRunner().invoke(app, ["selftest"])
+    result = CliRunner().invoke(app, ["selftest", "--stage", "graph"])
     assert result.exit_code == 0, result.output
     assert "PASS" in result.output
+
+
+@pytest.mark.browser
+def test_crawl_stage_matches_expected():
+    """The end-to-end gate: a real browser crawl of the fixture site."""
+    checks = run_crawl_stage()
+    failed = [c for c in checks if not c.ok]
+    assert not failed, "\n".join(f"{c.mode} {c.metric}: expected {c.expected}, got {c.actual}" for c in failed)
+    assert len(checks) == 29
