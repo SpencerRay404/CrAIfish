@@ -110,3 +110,40 @@ def test_invalid_region_selector_rejected_by_config():
     ok = copy.deepcopy(data)
     ok["scope"]["region_selectors"]["nav"] = [".global-nav > ul"]
     parse_config(ok)
+
+
+# ------------------------------------------------------------------ page data
+
+from pathcrawl.extract import detect_block, extract_page, visible_text  # noqa: E402
+
+
+def test_extract_page_fields():
+    html = """<html><head><title> My   Page </title>
+    <meta name="Description" content="About us">
+    <link rel="canonical" href="/canonical/">
+    <script type="application/ld+json">{"@graph":[{"@type":"Organization"},{"@type":["WebPage","FAQPage"]}]}</script>
+    <script type="application/ld+json">{broken</script>
+    </head><body><h1>Title</h1><h3>Deep</h3><form id="lead"></form><script>var x = 1;</script><p>Hello</p></body></html>"""
+    data = extract_page(html, PAGE, form_selector="form#lead")
+    assert data.title == "My Page"
+    assert data.meta_description == "About us"
+    assert data.canonical == "https://x.test/canonical/"
+    assert data.headings == [(1, "Title"), (3, "Deep")]
+    assert data.jsonld_types == ["(invalid JSON-LD)", "FAQPage", "Organization", "WebPage"]
+    assert data.form_present is True
+    assert data.text == "Title Deep Hello"  # script contents excluded
+    assert extract_page(html, PAGE).form_present is None  # no selector configured
+    assert extract_page("<p>x</p>", PAGE, "form#lead").form_present is False
+
+
+def test_visible_text_ignores_scripts_and_styles():
+    assert visible_text("<style>p{}</style><p>a <b>b</b></p><noscript>n</noscript>") == "a b"
+
+
+def test_detect_block():
+    assert detect_block(403, "x", "") == "HTTP 403"
+    assert detect_block(429, "x", "") == "HTTP 429"
+    assert detect_block(200, "Just a moment...", "Checking your browser") is not None
+    assert detect_block(200, "Security check", "Please complete the CAPTCHA") is not None
+    assert detect_block(200, "Our blog", "A long article about captcha design. " * 200) is None
+    assert detect_block(200, "Home", "Welcome") is None
