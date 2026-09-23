@@ -2,12 +2,9 @@
 and a few small synthetic graphs for the edge cases the fixture doesn't cover."""
 
 import time
-from pathlib import Path
 
 import pytest
 
-from pathcrawl.config import parse_config
-from pathcrawl.extract import extract_links
 from pathcrawl.graph import (
     ALL_LINKS,
     CONTENT_ONLY,
@@ -19,29 +16,10 @@ from pathcrawl.graph import (
     longest_simple_path_to_win,
     mode_view,
 )
+from pathcrawl.selftest import FIXTURE_BASE as BASE
+from pathcrawl.selftest import fixture_config, graph_from_html_files
 
-SITE = Path(__file__).parent / "fixtures" / "site"
-BASE = "http://fixture.test/"
-
-FIXTURE_CONFIG = parse_config(
-    {
-        "client": {"name": "Fixture", "slug": "fixture"},
-        "scope": {"allowed_domains": ["fixture.test"]},
-        "win": {"name": "Contact sales", "url_patterns": [BASE + "win.html"], "form_selector": "form#contact-sales"},
-        "campaigns": [
-            {
-                "id": "fixture",
-                "name": "Fixture",
-                "platform": "test",
-                "ad_copy": "Fixture ad.",
-                "entry_links": [
-                    {"label": "near", "url": BASE + "entry-near.html"},
-                    {"label": "far", "url": BASE + "entry-far.html"},
-                ],
-            }
-        ],
-    }
-)
+FIXTURE_CONFIG = fixture_config()
 
 
 def u(name: str) -> str:
@@ -49,18 +27,8 @@ def u(name: str) -> str:
 
 
 def fixture_graph():
-    """Build the graph exactly as the crawler will: extract links from HTML,
-    keep in-scope ones, mark wins by URL pattern."""
-    cfg = FIXTURE_CONFIG
-    pages, edges = [], []
-    for f in sorted(SITE.glob("*.html")):
-        url = cfg.scope.normalize(BASE + f.name)
-        win = cfg.win.url_matches(url)
-        pages.append(Page(url=url, win=win, win_source="pattern" if win else None))
-        for link in extract_links(f.read_text(), url, cfg.scope.strip_query_params):
-            if link.url and cfg.scope.in_scope(link.url):
-                edges.append(Edge(url, link.url, link.region))
-    return build_graph(pages, edges)
+    """Built exactly as the crawler will: extract links, keep in-scope, mark wins."""
+    return graph_from_html_files(FIXTURE_CONFIG)
 
 
 ENTRIES = [EntryPoint("near", u("entry-near")), EntryPoint("far", u("entry-far"))]

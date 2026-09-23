@@ -1,0 +1,48 @@
+# Expected results for the fixture site, worked out by hand (see README.md).
+# Used by `pathcrawl selftest` and tests/test_graph.py. Pages are named by file
+# stem ("entry-far" = entry-far.html). null means "none / never".
+
+max_depth: 8
+crawled_pages: 10
+entries:
+  near: entry-near
+  far: entry-far
+
+modes:
+  all_links:
+    reachable_pages: 10
+    shortest_path:
+      near: [entry-near, win]
+      far: [entry-far, win]
+    longest_path:
+      near: [entry-near, about, win]
+      far: [entry-far, article-1, trap-a, trap-b, trap-c, about, win]
+    worst_case_max_clicks: 1
+    distance_distribution: {0: 1, 1: 8}
+    dead_ends: [orphan]
+    dead_end_pct: 10.0
+    trap_loops: []
+    dead_zone_click:
+      near: 1
+      far: null
+    converged: true
+    overlap_jaccard: 0.333
+
+  content_only:
+    reachable_pages: 9
+    shortest_path:
+      near: [entry-near, win]
+      far: [entry-far, article-1, article-2, win]
+    longest_path:
+      near: [entry-near, win]
+      far: [entry-far, article-1, article-2, win]
+    worst_case_max_clicks: 3
+    distance_distribution: {0: 1, 1: 2, 2: 1, 3: 1}
+    dead_ends: [orphan, trap-a, trap-b, trap-c]
+    dead_end_pct: 40.0
+    trap_loops: [[trap-a, trap-b, trap-c]]
+    dead_zone_click:
+      near: 1
+      far: 2
+    converged: true
+    overlap_jaccard: 0.2
