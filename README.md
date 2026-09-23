@@ -9,9 +9,10 @@ The question it answers is not "what's broken?" but **"how reachable is our win?
 Nothing in the code is client-specific: every client detail lives in a YAML
 config file.
 
-> **Status:** v1 in progress. Built so far: config validation and URL
-> normalization (`pathcrawl validate`). Coming next: graph metrics, the
-> headed crawler, and reports.
+> **Status:** v1 in progress. Built so far: config validation, URL
+> normalization, link-region extraction, and every path metric, proven
+> against a fixture site (`tests/fixtures/site/README.md` lists its expected
+> numbers). Coming next: the headed crawler and reports.
 
 ## Setup
 
@@ -28,12 +29,41 @@ pytest
 
 ```bash
 pathcrawl validate --config configs/ups.yaml
+pathcrawl selftest
 ```
 
 `validate` either prints a summary of the config or lists every problem with
 its location in the file (for example `crawl.max_dept: Extra inputs are not
 permitted`). It also warns about things that are valid but probably wrong, such
 as leftover `REPLACE-ME` placeholders.
+
+## Test gates
+
+Each build step has to pass these before it merges. You can run all of them
+yourself; CI runs the same ones on every pull request
+(`.github/workflows/tests.yml`).
+
+```bash
+pytest                    # unit tests
+pathcrawl selftest        # expected vs actual for every metric, on the fixture site
+```
+
+`pathcrawl selftest` runs every stage built so far against the fixture site in
+`tests/fixtures/site/` and prints one row per metric with a ✓ or ✗, comparing
+the result with the hand-worked numbers in `tests/fixtures/site/expected.yaml`.
+It exits non-zero if anything differs.
+
+| stage | what it proves | added in |
+|---|---|---|
+| `graph` | link extraction and every path metric, reading the fixture HTML directly | step 2 |
+| `crawl` | the real browser crawl of the fixture site produces the same graph and numbers | step 3 |
+| `report` | report files are written, and their numbers match the analysis | step 4 |
+
+To see the fixture site the numbers describe, serve it and click around:
+
+```bash
+python -m http.server -d tests/fixtures/site 8000   # then open http://localhost:8000/entry-far.html
+```
 
 ## Writing a client config
 
