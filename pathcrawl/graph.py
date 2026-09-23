@@ -450,3 +450,44 @@ def analyze(
     for mode in MODES:
         analysis.modes[mode] = analyze_mode(g, entries, mode, max_depth, time_budget_s)
     return analysis
+
+
+# --------------------------------------------------------------------------- from a crawl
+
+
+def graph_from_store(store) -> tuple[nx.DiGraph, list[EntryPoint]]:
+    """Build the graph and entry points from a crawl database (``pathcrawl.store.Store``).
+
+    - Loaded pages (``ok``, ``http_error``) are explored nodes.
+    - Pages the crawl could not or would not load (skipped, blocked by robots)
+      are unexplored nodes, as are in-scope links the crawl never reached.
+    - Pages that redirected off the allowlist are left out, along with links to them.
+    - Link targets are resolved through redirects, so a link to an old URL
+      points at the page it actually lands on.
+    """
+    from pathcrawl.store import EXPLORED_STATUSES
+
+    pages, offsite = [], set()
+    for row in store.pages():
+        if row["status"] == "offsite":
+            offsite.add(row["url"])
+            continue
+        pages.append(
+            Page(
+                url=row["url"],
+                explored=row["status"] in EXPLORED_STATUSES,
+                win=bool(row["win"]),
+                win_source=row["win_source"],
+            )
+        )
+    edges = []
+    for row in store.links():
+        if not row["in_scope"] or not row["url"]:
+            continue
+        dst = store.resolve(row["url"])
+        if dst in offsite:
+            continue
+        region = row["region"] if not row["operator"] else BODY
+        edges.append(Edge(row["src"], dst, region, operator=bool(row["operator"])))
+    entries = [EntryPoint(r["label"], r["node_url"]) for r in store.entries()]
+    return build_graph(pages, edges), entries
