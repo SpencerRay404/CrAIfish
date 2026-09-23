@@ -9,9 +9,10 @@ The question it answers is not "what's broken?" but **"how reachable is our win?
 Nothing in the code is client-specific: every client detail lives in a YAML
 config file.
 
-> **Status:** v1 in progress. Built so far: config validation and URL
-> normalization (`pathcrawl validate`). Coming next: graph metrics, the
-> headed crawler, and reports.
+> **Status:** v1 in progress. Built so far: config validation, URL
+> normalization, link-region extraction, and every path metric, proven
+> against a fixture site (`tests/fixtures/site/README.md` lists its expected
+> numbers). Coming next: the headed crawler and reports.
 
 ## Setup
 
