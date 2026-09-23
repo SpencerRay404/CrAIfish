@@ -1,0 +1,48 @@
+# Generic example client config. Copy this file per client; see README.md.
+
+client:
+  name: "Example Co"
+  slug: "example"               # lowercase; used in run directory names
+
+scope:
+  allowed_domains:              # the crawl never leaves these hosts; list subdomains explicitly
+    - "www.example.com"
+    - "blog.example.com"
+  locale_include: ["/en-us/"]   # optional: path must contain one of these (case-insensitive)
+  locale_exclude: ["/careers/"] # optional: path must contain none of these
+  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk"]
+  region_selectors:             # optional: extra selectors for menus that aren't <nav>/<header>/<footer>
+    nav: [".global-nav"]
+    header: []
+    footer: []
+
+win:
+  name: "Contact sales form"
+  url_patterns:                 # any match = win. Globs match the whole URL; prefix "re:" for a regex.
+    - "https://www.example.com/en-us/contact-sales*"
+    - "re:https://www\\.example\\.com/en-us/demo/[a-z-]+/request"
+  form_selector: "form#contact-sales"  # optional: confirm the form actually rendered
+  require_form: false           # if true, a URL match without the form is not a win
+
+campaigns:
+  - id: "spring-launch-01"
+    name: "Spring launch ad 1"
+    platform: "linkedin"
+    ad_copy: |
+      Shipping delays costing you customers? See how Example Co cut
+      delivery times by 30% for mid-size retailers. Read the report.
+    entry_links:
+      - label: "Read the report"
+        url: "https://www.example.com/en-us/insights/delivery-report?utm_source=linkedin"
+      - label: "mid-size retailers"
+        url: "https://blog.example.com/en-us/retail/mid-size"
+
+crawl:
+  max_depth: 8          # max clicks from an entry link
+  max_pages: 300        # hard cap on pages fetched per campaign
+  delay_ms: 1500        # pause between page loads
+  headed: true          # visible browser; --headless overrides
+  slow_mo_ms: 400       # slows each browser action so people can watch
+  respect_robots: true
+  page_timeout_ms: 30000
+  screenshot: true

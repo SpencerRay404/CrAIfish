@@ -1,0 +1,47 @@
+# UPS client config. PLACEHOLDER VALUES ONLY: replace every REPLACE-ME before crawling.
+# `pathcrawl validate --config configs/ups.yaml` warns about any that remain.
+
+client:
+  name: "UPS"
+  slug: "ups"
+
+scope:
+  allowed_domains:
+    - "www.ups.com"
+    - "about.ups.com"
+  locale_include: ["/us/en/"]
+  locale_exclude: []
+  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk"]
+  region_selectors:
+    nav: []
+    header: []
+    footer: []
+
+win:
+  name: "VC form"
+  url_patterns:
+    - "https://www.ups.com/us/en/REPLACE-ME/*"
+  form_selector: "form#REPLACE-ME"
+  require_form: false
+
+campaigns:
+  - id: "tl-2026-q3-01"
+    name: "Thought leadership ad 1"
+    platform: "linkedin"
+    ad_copy: |
+      REPLACE-ME: paste the full ad paragraph here.
+    entry_links:
+      - label: "REPLACE-ME link 1"
+        url: "https://www.ups.com/us/en/REPLACE-ME-1"
+      - label: "REPLACE-ME link 2"
+        url: "https://www.ups.com/us/en/REPLACE-ME-2"
+
+crawl:
+  max_depth: 8
+  max_pages: 300
+  delay_ms: 1500
+  headed: true
+  slow_mo_ms: 400
+  respect_robots: true
+  page_timeout_ms: 30000
+  screenshot: true
