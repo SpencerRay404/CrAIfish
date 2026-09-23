@@ -14,8 +14,9 @@ from __future__ import annotations
 import re
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
+import soupsieve
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -53,6 +54,16 @@ class RegionSelectors(_Strict):
     nav: list[str] = []
     header: list[str] = []
     footer: list[str] = []
+
+    @field_validator("nav", "header", "footer")
+    @classmethod
+    def _check_selectors(cls, selectors: list[str]) -> list[str]:
+        for sel in selectors:
+            try:
+                soupsieve.compile(sel)
+            except Exception as e:  # soupsieve raises SelectorSyntaxError and others
+                raise ValueError(f"invalid CSS selector {sel!r}: {e}") from None
+        return selectors
 
 
 class ScopeConfig(_Strict):
