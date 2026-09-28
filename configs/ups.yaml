@@ -1,5 +1,13 @@
-# UPS client config. PLACEHOLDER VALUES ONLY: replace every REPLACE-ME before crawling.
-# `pathcrawl validate --config configs/ups.yaml` warns about any that remain.
+# UPS client config.
+#
+# Campaign "site-map-us-en" maps and categorizes the US-English site from the
+# home page and the manufacturing solutions page (no ad involved):
+#   pathcrawl crawl  --config configs/ups.yaml --campaign site-map-us-en --headless --max-pages 2000
+#   pathcrawl report --run runs/ups/site-map-us-en/<timestamp>
+#
+# Campaign "tl-2026-q3-01" is the LinkedIn thought-leadership ad; it still has
+# REPLACE-ME placeholders until the ad text and its links are filled in, and
+# `pathcrawl crawl` refuses to run it until then.
 
 client:
   name: "UPS"
@@ -9,27 +17,46 @@ scope:
   allowed_domains:
     - "www.ups.com"
     - "about.ups.com"
+    - "solutions.ups.com"
   locale_include: ["/us/en/"]
+  # Only these hosts put the locale in the path; solutions.ups.com pages
+  # (including the win) look like /virtual-consultation-us-en-v4.html.
+  locale_hosts: ["www.ups.com", "about.ups.com"]
   locale_exclude: []
-  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk"]
+  # WT.mc_id is UPS's campaign tracking code; stripping it makes every
+  # "Talk With an Expert" link point at the same consultation page.
+  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk", "WT.*"]
   region_selectors:
     nav: []
     header: []
     footer: []
 
 win:
-  name: "VC form"
+  name: "virtual consultation form"
+  # The "Talk With an Expert" button on solutions pages links here (the v4
+  # suffix may change, hence the wildcard).
   url_patterns:
-    - "https://www.ups.com/us/en/REPLACE-ME/*"
-  form_selector: "form#REPLACE-ME"
+    - "https://solutions.ups.com/virtual-consultation-us-en*"
   require_form: false
 
 campaigns:
+  - id: "site-map-us-en"
+    name: "US-English site map"
+    platform: "site-map"
+    ad_copy: |
+      No ad: a site-map run that starts from the US home page and the
+      manufacturing solutions page and follows every in-scope link.
+    entry_links:
+      - label: "US home page"
+        url: "https://www.ups.com/us/en/home"
+      - label: "Manufacturing solutions page"
+        url: "https://solutions.ups.com/manufacturing-ussp-page.html"
+
   - id: "tl-2026-q3-01"
-    name: "Thought leadership ad 1"
+    name: "Thought leadership ad 1 (LinkedIn: integrated supply chain risk management)"
     platform: "linkedin"
     ad_copy: |
-      REPLACE-ME: paste the full ad paragraph here.
+      REPLACE-ME: paste the full text of the LinkedIn article here.
     entry_links:
       - label: "REPLACE-ME link 1"
         url: "https://www.ups.com/us/en/REPLACE-ME-1"

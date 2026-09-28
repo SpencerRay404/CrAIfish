@@ -70,6 +70,10 @@ class ScopeConfig(_Strict):
     allowed_domains: list[str] = Field(min_length=1)
     locale_include: list[str] = []
     locale_exclude: list[str] = []
+    # Hosts the locale filters apply to. Empty = every allowed domain. Use it
+    # when only some hosts put the locale in the path (e.g. www.ups.com/us/en/
+    # but solutions.ups.com/some-page.html).
+    locale_hosts: list[str] = []
     strip_query_params: list[str] = []
     region_selectors: RegionSelectors = RegionSelectors()
 
@@ -93,7 +97,17 @@ class ScopeConfig(_Strict):
     def domain_allowed(self, url: str) -> bool:
         return host_allowed(url, self.allowed_domains)
 
+    @model_validator(mode="after")
+    def _locale_hosts_are_allowed(self) -> ScopeConfig:
+        self.locale_hosts = [h.strip().lower().rstrip(".") for h in self.locale_hosts]
+        unknown = [h for h in self.locale_hosts if h not in self.allowed_domains]
+        if unknown:
+            raise ValueError(f"locale_hosts {unknown} must also be in allowed_domains")
+        return self
+
     def locale_allowed(self, url: str) -> bool:
+        if self.locale_hosts and host_of(url) not in self.locale_hosts:
+            return True
         return locale_allowed(url, self.locale_include, self.locale_exclude)
 
     def in_scope(self, url: str) -> bool:
@@ -256,6 +270,17 @@ def _placeholder_paths(value: object, path: str = "") -> list[str]:
     if isinstance(value, list):
         return [p for i, v in enumerate(value) for p in _placeholder_paths(v, f"{path}[{i}]")]
     return []
+
+
+def blocking_placeholders(config: Config, campaign_id: str) -> list[str]:
+    """Placeholders that would break a crawl of this campaign (the win and the
+    campaign itself). Placeholders in other campaigns don't block it."""
+    idx = next(i for i, c in enumerate(config.campaigns) if c.id == campaign_id)
+    return [
+        f"{p} still contains the placeholder {PLACEHOLDER!r}"
+        for p in _placeholder_paths(config.model_dump())
+        if p.startswith("win.") or p.startswith(f"campaigns[{idx}]")
+    ]
 
 
 def config_warnings(config: Config) -> list[str]:

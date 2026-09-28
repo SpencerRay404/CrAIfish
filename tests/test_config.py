@@ -56,14 +56,27 @@ def test_valid_config_parses_with_crawl_defaults():
 
 
 def test_shipped_configs_are_valid():
-    for name in ("example.yaml", "ups.yaml"):
+    for name in ("example.yaml", "ups.yaml", "demo.yaml"):
         load_config(CONFIGS / name)
 
 
-def test_ups_config_warns_about_placeholders():
-    warnings = config_warnings(load_config(CONFIGS / "ups.yaml"))
-    assert any("win.url_patterns[0]" in w and "REPLACE-ME" in w for w in warnings)
-    assert any("campaigns[0].entry_links[0].url" in w for w in warnings)
+def test_ups_config():
+    from pathcrawl.config import blocking_placeholders
+
+    c = load_config(CONFIGS / "ups.yaml")
+    # the site map is ready to crawl; the LinkedIn campaign still has placeholders
+    assert blocking_placeholders(c, "site-map-us-en") == []
+    assert blocking_placeholders(c, "tl-2026-q3-01")
+    # /us/en/ applies to www.ups.com but not solutions.ups.com, where the win lives
+    assert c.scope.in_scope("https://www.ups.com/us/en/shipping.page")
+    assert not c.scope.in_scope("https://www.ups.com/gb/en/shipping.page")
+    assert c.scope.in_scope("https://solutions.ups.com/manufacturing-ussp-page.html")
+    # both "Talk With an Expert" tracking variants land on the same win page
+    for code in ("InvMgmt_0625_MktgVirtualConsultationMainPage_109541", "WHConnections_0625_MktgVirtualConsultationMainPage_109543"):
+        url = c.scope.normalize(f"https://solutions.ups.com/virtual-consultation-us-en-v4.html?WT.mc_id=ONLINE_CONTENT_{code}")
+        assert url == "https://solutions.ups.com/virtual-consultation-us-en-v4.html"
+        assert c.win.url_matches(url)
+    assert not c.win.url_matches("https://solutions.ups.com/manufacturing-ussp-page.html")
 
 
 def test_example_config_has_no_warnings():
@@ -220,3 +233,23 @@ def test_cli_validate(tmp_path):
     bad.write_text(yaml.safe_dump(cfg(crawl={"max_pages": 0})))
     result = runner.invoke(app, ["validate", "--config", str(bad)])
     assert result.exit_code == 1
+
+
+def test_locale_filters_can_be_limited_to_some_hosts():
+    c = parse_config(cfg(scope={"locale_hosts": ["www.acme.test"]}))
+    assert not c.scope.in_scope("https://www.acme.test/fr/page")  # filtered host
+    assert c.scope.in_scope("https://blog.acme.test/any-page.html")  # not filtered
+    assert "must also be in allowed_domains" in error_for(cfg(scope={"locale_hosts": ["other.test"]}))
+
+
+def test_placeholders_only_block_the_campaign_being_crawled():
+    from pathcrawl.config import blocking_placeholders
+
+    data = cfg()
+    data["campaigns"].append({
+        "id": "todo", "name": "n", "platform": "p", "ad_copy": "REPLACE-ME",
+        "entry_links": [{"label": "l", "url": "https://www.acme.test/en/REPLACE-ME"}],
+    })
+    c = parse_config(data)
+    assert blocking_placeholders(c, "c1") == []
+    assert len(blocking_placeholders(c, "todo")) == 2
