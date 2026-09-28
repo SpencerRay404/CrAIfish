@@ -357,3 +357,21 @@ def test_closing_the_browser_saves_and_resumes(make_site, tmp_path):
     c2, status = crawl(cfg, tmp_path)
     assert status == "complete"
     assert c2.store.explored_count() == 3
+
+
+def test_file_download_instead_of_page_is_named_and_recorded(make_site, tmp_path):
+    """Some servers answer certain clients with a file instead of the page."""
+    from pathcrawl.crawler import DOWNLOAD
+
+    site = make_site({
+        "/start.html": (200, {"Content-Type": "application/octet-stream",
+                              "Content-Disposition": 'attachment; filename="home.bin"'}, "binary"),
+    })
+    op = ScriptedOperator([Decision(SKIP)])
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path, op)
+    assert [p.kind for p in op.problems] == [DOWNLOAD]
+    detail = op.problems[0].detail
+    assert "HTTP 200" in detail and "application/octet-stream" in detail and "home.bin" in detail
+    assert "headless" in detail and "HeadlessChrome" in detail
+    assert page_row(c, site.base + "/start.html")["error"].startswith(DOWNLOAD)
+    assert "HeadlessChrome" in c.store.meta("user_agent")

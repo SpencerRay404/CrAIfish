@@ -42,6 +42,7 @@ NAV_ERROR = "navigation error"
 OFFSITE_REDIRECT = "entry link left the allowlist"
 NO_LINKS = "no crawlable links"
 CONSENT = "consent banner"
+DOWNLOAD = "file download instead of a page"
 
 RETRY, SKIP, GOTO_URL, MARK_WIN, QUIT = "retry", "skip", "url", "win", "quit"
 
@@ -279,6 +280,8 @@ class Crawler:
             context = browser.new_context(viewport={"width": 1366, "height": 900})
             self.context = context
             self.page = self._new_page()
+            self.user_agent = self.page.evaluate("navigator.userAgent")
+            self.store.set_meta(user_agent=self.user_agent, headless=not self.headed)
             self.robots = RobotsCache(context.request, cc.respect_robots)
             self.request = context.request
             try:
@@ -424,6 +427,21 @@ class Crawler:
                 continue
         return True
 
+    def _describe_download(self, url: str) -> str:
+        """What the server sent instead of a page, as evidence for the report."""
+        mode = "visible" if self.headed else "headless"
+        try:
+            resp = self.request.get(url, timeout=self.config.crawl.page_timeout_ms, max_redirects=10)
+            h = resp.headers
+            parts = [f"HTTP {resp.status}", f"content-type {h.get('content-type') or 'none'}"]
+            if h.get("content-disposition"):
+                parts.append(f"content-disposition {h['content-disposition']}")
+            sent = ", ".join(parts)
+        except Exception as e:
+            sent = f"could not re-fetch it ({str(e).splitlines()[0]})"
+        return (f"the server answered with a file download, not a web page ({sent}); "
+                f"browser: {mode}, user agent: {self.user_agent}")
+
     def _raw_text_len(self, url: str) -> int | None:
         """Visible text length of the plain HTTP response, before any JavaScript runs."""
         try:
@@ -466,10 +484,14 @@ class Crawler:
             except Exception as e:
                 if _is_browser_closed(e):
                     raise
-                d = self._ask(Problem(NAV_ERROR, url, str(e).splitlines()[0], loaded=False))
+                if "Download is starting" in str(e):
+                    kind, detail = DOWNLOAD, self._describe_download(url)
+                else:
+                    kind, detail = NAV_ERROR, str(e).splitlines()[0]
+                d = self._ask(Problem(kind, url, detail, loaded=False))
                 if d.action == RETRY:
                     continue
-                self._save_failed(url, depth, "skipped", str(e).splitlines()[0], win=d.action == MARK_WIN)
+                self._save_failed(url, depth, "skipped", f"{kind}: {detail}", win=d.action == MARK_WIN)
                 self._follow_operator_url(url, depth, d)
                 return
 
