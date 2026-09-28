@@ -289,13 +289,40 @@ class Crawler:
                 self.store.set_meta(status=status, finished_at=datetime.now(UTC).isoformat(timespec="seconds"))
                 context.close()
                 browser.close()
+        self._summary()
         return status
+
+    def _summary(self) -> None:
+        """One line on how the crawl went; loud when nothing loaded at all."""
+        rows = self.store.db.execute("SELECT status, COUNT(*) FROM pages GROUP BY status").fetchall()
+        counts = {r[0]: r[1] for r in rows}
+        loaded = counts.get("ok", 0) + counts.get("http_error", 0)
+        failed = counts.get("skipped", 0)
+        parts = [f"{loaded} pages loaded"] + [f"{n} {k}" for k, n in sorted(counts.items()) if k not in ("ok", "http_error")]
+        wins = self.store.db.execute("SELECT COUNT(*) FROM pages WHERE win = 1").fetchone()[0]
+        parts.append(f"{wins} win page{'s' if wins != 1 else ''} found")
+        if loaded == 0 and failed:
+            first = self.store.db.execute(
+                "SELECT url, error FROM pages WHERE status = 'skipped' ORDER BY crawled_at LIMIT 1"
+            ).fetchone()
+            self.console.print(
+                f"[bold red]No pages loaded.[/] First error on {escape(first['url'])}:\n  {escape(first['error'] or '')}",
+                highlight=False,
+            )
+        else:
+            self.console.print("Summary: " + ", ".join(parts), highlight=False)
 
     # ------------------------------------------------------------------ one page
 
     def _ask(self, problem: Problem) -> Decision:
         decision = self.operator.decide(problem, self.config)
         self.store.log_action(problem.url, problem.kind, decision.action, decision.url or problem.detail)
+        # Always leave a trace in the terminal, even when no one was asked.
+        self.console.print(
+            f"[yellow]  ! {escape(problem.kind)}[/] {escape(problem.url)}  [dim]{escape(problem.detail)}[/]"
+            f"  → {decision.action}" + (f" {escape(decision.url)}" if decision.url else ""),
+            highlight=False,
+        )
         if decision.action == QUIT:
             raise OperatorQuit
         return decision
