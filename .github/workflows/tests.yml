@@ -29,3 +29,4 @@ jobs:
         run: |
           pathcrawl validate --config configs/example.yaml
           pathcrawl validate --config configs/ups.yaml
+          pathcrawl validate --config configs/demo.yaml

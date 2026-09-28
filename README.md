@@ -9,10 +9,10 @@ The question it answers is not "what's broken?" but **"how reachable is our win?
 Nothing in the code is client-specific: every client detail lives in a YAML
 config file.
 
-> **Status:** v1 in progress. Built so far: config validation, URL
-> normalization, every path metric, and the headed crawler with operator
-> prompts. Every stage is proven against a fixture site; see [Test gates](#test-gates).
-> Coming next: reports (`report.md`, `report.json`, GraphML, Mermaid).
+> **Status:** v1 feature-complete: config validation, URL normalization, the
+> headed crawler with operator prompts, every path metric, page
+> categorization, and reports. Every stage is proven against a fixture site;
+> see [Test gates](#test-gates). LLM scoring is stubbed for v2 (`pathcrawl/scoring/`).
 
 ## Setup
 
@@ -28,11 +28,39 @@ pytest
 ## Usage
 
 ```bash
-pathcrawl validate --config configs/ups.yaml                  # check a config
-pathcrawl crawl    --config configs/ups.yaml --campaign tl-2026-q3-01
-pathcrawl analyze  --run runs/ups/tl-2026-q3-01/<timestamp>   # every metric -> analysis.json
-pathcrawl selftest                                            # the test gate (see below)
+pathcrawl validate   --config configs/ups.yaml                       # check a config
+pathcrawl crawl      --config configs/ups.yaml --campaign tl-2026-q3-01
+pathcrawl report     --run runs/ups/tl-2026-q3-01/<timestamp>        # every output file
+pathcrawl analyze    --run <run dir>                                 # just the metrics -> analysis.json
+pathcrawl categorize --run <run dir>                                 # just the page categories -> categories.csv
+pathcrawl selftest                                                   # the test gate (see below)
 ```
+
+**Try it on a live site first.** `configs/demo.yaml` crawls
+[quotes.toscrape.com](https://quotes.toscrape.com), a public site built for
+scraping practice, with its login page as the "win":
+
+```bash
+pathcrawl crawl  --config configs/demo.yaml --campaign demo-quotes
+pathcrawl report --run runs/demo/demo-quotes/<timestamp>
+```
+
+The site's only link to the login page is in its header, so the report shows
+the two modes disagreeing: every page is 1 click from the win counting all
+links, and no page reaches it through content links.
+
+**Mapping a whole site.** A campaign doesn't have to be an ad: seed it with the
+home page and let the crawler map everything in scope. `configs/ups.yaml` has
+one (`site-map-us-en`). Raise the limits for the run from the command line:
+
+```bash
+pathcrawl crawl  --config configs/ups.yaml --campaign site-map-us-en --headless --max-pages 2000
+pathcrawl report --run runs/ups/site-map-us-en/<timestamp>
+```
+
+At the default 1.5 s delay, 2,000 pages take roughly 1–2 hours. Quit any time
+with `q` (or Ctrl-C at a prompt) and continue with `--resume`; the limits you
+passed are saved with the run.
 
 `validate` either prints a summary of the config or lists every problem with
 its location in the file (for example `crawl.max_dept: Extra inputs are not
@@ -65,6 +93,7 @@ Options:
 | `--non-interactive` | never pause: accept pages that loaded, skip pages that failed |
 | `--resume RUN_DIR` | continue a run that was quit or crashed |
 | `--runs-dir DIR` | where run directories go (default `runs/`) |
+| `--max-pages N`, `--max-depth N` | override the config's limits for this run (kept on resume) |
 
 **When it gets stuck, it asks you.** It pauses on a block, CAPTCHA, 403 or
 429, on a timeout or navigation error (after one automatic retry in a fresh
@@ -98,7 +127,48 @@ Each crawl writes to `runs/<client>/<campaign>/<timestamp>/`:
 | `config.yaml` | the exact config the run used (resume reads this) |
 | `crawl.db` | SQLite: pages, links, redirects, queue, operator actions |
 | `screenshots/` | one full-page JPEG per page |
-| `analysis.json` | every metric, written by `pathcrawl analyze` |
+| `report.md` | the human-readable report (see below) |
+| `report.json` | every metric, the categories summary, crawl facts, operator actions |
+| `graph.graphml` | the full link graph for Gephi or similar |
+| `paths.mmd` | Mermaid diagram of each entry link's shortest path and nearest dead zone |
+| `categories.csv` | one row per page: section, page type, reachability, content signals |
+| `analysis.json` | the raw metrics, written by `pathcrawl analyze` |
+
+At the end of every crawl the terminal prints a summary (pages loaded, skipped,
+win pages found). If nothing loaded at all it says so in red with the first
+error, and `crawl` exits with an error.
+
+## Reading the report
+
+`report.md` opens with a one-paragraph headline in plain language, then:
+
+1. **Entry links**: for each link in the ad, the shortest and longest simple
+   path to the win in both modes, and the click at which the journey can first
+   fall into a dead zone. Read the *content only* columns first: they show
+   whether the page content itself leads people to the win. The *all links*
+   columns include the site navigation, which usually makes everything look
+   close.
+2. **Shortest journeys**: the actual pages, and a Mermaid diagram (GitHub and
+   VS Code render it): blue = entry link, green = win, red dashed = the nearest
+   way into a dead zone.
+3. **Dead zones**: dead ends, trap loops, and pages marked *unknown* because
+   they lead only to pages the crawl didn't reach. A large *unknown* count
+   means the crawl was cut short; raise `--max-pages` or `--max-depth`.
+4. **Distance to the win**: how many pages sit 1, 2, 3… clicks from the win.
+5. **Convergence**: whether all the ad's links lead to the same win.
+6. **Operator dependency**: journeys that only worked because the operator
+   jumped (`[u]`) or marked a win (`[w]`). A real visitor likely couldn't
+   complete them.
+7. **Site map: page categories**: every page grouped by site section and page
+   type, with the share that can reach the win in each mode, plus content
+   signals that matter for AI and agent readability (JavaScript-only content,
+   missing structured data, missing H1 or meta description, slow pages).
+8. **Metric definitions**: the exact meaning of every number above.
+
+Page types come from generic URL patterns (`support`, `tool`, `content`,
+`corporate`, `product/service`, `account`, `home`, `other`; see
+`PAGE_TYPE_RULES` in `pathcrawl/categorize.py`). They are a first cut: check
+`categories.csv` and adjust the rules if a site names things differently.
 
 ## Test gates
 
@@ -126,7 +196,7 @@ It exits non-zero if anything differs.
 |---|---|---|
 | `graph` | link extraction and every path metric, reading the fixture HTML directly | step 2 |
 | `crawl` | a real headless-browser crawl of the served fixture site reproduces the same numbers (`--headed` to watch it) | step 3 |
-| `report` | report files are written, and their numbers match the analysis | step 4 |
+| `report` | every report file is written for that crawl, and its numbers and each page's category match | step 4 |
 
 To see the fixture site the numbers describe, serve it and click around:
 
@@ -150,6 +220,9 @@ the output directory `runs/<slug>/...`.
   substrings of the URL path. With `locale_include: ["/us/en/"]`, only paths
   containing `/us/en/` are crawled. These filters apply to entry links too,
   so `validate` rejects an entry link that the filters would exclude.
+- **`locale_hosts`** (optional): the hosts the locale filters apply to. Empty
+  means all of them. Use it when only some hosts put the locale in the path,
+  e.g. `www.ups.com/us/en/...` but `solutions.ups.com/some-page.html`.
 - **`strip_query_params`**: query params removed before URLs are compared.
   Globs are allowed (`utm_*`), and matching ignores case.
 - **`region_selectors`** (optional): extra CSS selectors for `nav`,
