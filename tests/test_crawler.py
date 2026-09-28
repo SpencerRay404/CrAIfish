@@ -331,3 +331,29 @@ def test_stuck_consent_banner_prompts_operator(make_site, tmp_path):
     c, _ = crawl(config_for(site, ["/start.html"]), tmp_path, op)
     assert [p.kind for p in op.problems] == [CONSENT]
     assert page_row(c, site.base + "/start.html")["status"] == "ok"  # accepted as is
+
+
+def test_closing_the_browser_saves_and_resumes(make_site, tmp_path):
+    """Closing the window mid-crawl is a save-and-quit, not a crash."""
+    site = make_site({
+        "/start.html": (200, {}, html(NAV + '<a href="/a.html">A</a>')),
+        "/a.html": (200, {}, html(NAV + "<p>a</p>")),
+        "/win.html": WIN,
+    })
+    cfg = config_for(site, ["/start.html"])
+
+    class ClosesWindowAfterFirstPage(Crawler):
+        def _process(self, url, depth):
+            super()._process(url, depth)
+            self.page.close()  # what happens when someone closes the visible window
+
+    c1 = ClosesWindowAfterFirstPage(cfg, cfg.campaigns[0], tmp_path, NonInteractiveOperator(), headed=False)
+    assert c1.run() == "quit"
+    assert c1.store.meta("status") == "quit"
+    assert c1.store.explored_count() == 1
+    assert c1.store.operator_actions() == []  # not mistaken for a navigation error
+    c1.store.close()
+
+    c2, status = crawl(cfg, tmp_path)
+    assert status == "complete"
+    assert c2.store.explored_count() == 3

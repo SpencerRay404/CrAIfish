@@ -68,6 +68,17 @@ class OperatorQuit(Exception):
     """The operator chose to save and quit. The run can be resumed."""
 
 
+class BrowserClosed(Exception):
+    """The browser window was closed (usually by the person watching). Treated
+    like save-and-quit: everything crawled so far is kept and the run can resume."""
+
+
+def _is_browser_closed(error: BaseException) -> bool:
+    from playwright._impl._errors import TargetClosedError
+
+    return isinstance(error, (BrowserClosed, TargetClosedError)) or "has been closed" in str(error)
+
+
 class TerminalOperator:
     """Asks the person at the keyboard."""
 
@@ -284,13 +295,27 @@ class Crawler:
                         time.sleep(cc.delay_ms / 1000)
             except OperatorQuit:
                 status = "quit"
-                self.console.print("[yellow]Saved. Resume with: pathcrawl crawl --resume " f"{escape(str(self.run_dir))}[/]")
+                self._resume_hint("Saved.")
+            except KeyboardInterrupt:
+                status = "quit"
+                self._resume_hint("Interrupted; progress saved.")
+            except Exception as e:
+                if not _is_browser_closed(e):
+                    raise
+                status = "quit"
+                self._resume_hint("The browser window was closed; progress saved.")
             finally:
                 self.store.set_meta(status=status, finished_at=datetime.now(UTC).isoformat(timespec="seconds"))
-                context.close()
-                browser.close()
+                for closeable in (context, browser):
+                    try:
+                        closeable.close()
+                    except Exception:
+                        pass  # already closed by the person watching
         self._summary()
         return status
+
+    def _resume_hint(self, what: str) -> None:
+        self.console.print(f"[yellow]{what} Resume with: pathcrawl crawl --resume {escape(str(self.run_dir))}[/]")
 
     def _summary(self) -> None:
         """One line on how the crawl went; loud when nothing loaded at all."""
@@ -346,11 +371,15 @@ class Crawler:
         giving up (the operator is only asked if the second attempt fails too)."""
         try:
             return self._visit(self.page, url)
-        except Exception:
+        except Exception as e:
+            if _is_browser_closed(e) or self.page.is_closed():
+                raise BrowserClosed from e
             self._reset_tab()
         try:
             return self._visit(self.page, url)
-        except Exception:
+        except Exception as e:
+            if _is_browser_closed(e) or self.page.is_closed():
+                raise BrowserClosed from e
             self._reset_tab()
             raise
 
@@ -435,6 +464,8 @@ class Crawler:
                 visit = self._visit_with_reset(url)
                 page = self.page
             except Exception as e:
+                if _is_browser_closed(e):
+                    raise
                 d = self._ask(Problem(NAV_ERROR, url, str(e).splitlines()[0], loaded=False))
                 if d.action == RETRY:
                     continue
