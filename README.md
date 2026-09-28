@@ -54,11 +54,12 @@ home page and let the crawler map everything in scope. `configs/ups.yaml` has
 one (`site-map-us-en`). Raise the limits for the run from the command line:
 
 ```bash
-pathcrawl crawl  --config configs/ups.yaml --campaign site-map-us-en --headless --max-pages 2000
+pathcrawl crawl  --config configs/ups.yaml --campaign site-map-us-en --headless
 pathcrawl report --run runs/ups/site-map-us-en/<timestamp>
 ```
 
-At the default 1.5 s delay, 2,000 pages take roughly 1–2 hours. Quit any time
+The UPS config allows 500 pages per run; add `--max-pages 2000` for a bigger
+map. At the default 1.5 s delay, 500 pages take about 20–30 minutes. Quit any time
 with `q` (or Ctrl-C at a prompt) and continue with `--resume`; the limits you
 passed are saved with the run.
 

@@ -191,7 +191,9 @@ def crawl(
     if loaded == 0:
         err_console.print("[bold red]crawl:[/] no pages loaded; see the errors above. Nothing to analyze.")
         raise typer.Exit(code=1)
-    console.print(f"Crawl {status}. Next: pathcrawl analyze --run {escape(str(run_dir))}")
+    ended = {"complete": "Crawl complete.", "budget": "Crawl stopped at the page budget.", "quit": "Crawl paused."}[status]
+    next_step = f"pathcrawl crawl --resume {run_dir}" if status == "quit" else f"pathcrawl report --run {run_dir}"
+    console.print(f"{ended} Next: {escape(next_step)}")
 
 
 def _to_jsonable(value: object) -> object:
