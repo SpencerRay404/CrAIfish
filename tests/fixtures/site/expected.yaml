@@ -46,3 +46,16 @@ modes:
       far: 2
     converged: true
     overlap_jaccard: 0.2
+
+# Where each page stands with content links only (categories.csv, reach_content_only).
+categories_content_only:
+  win: win
+  entry-near: reaches win
+  entry-far: reaches win
+  article-1: reaches win
+  article-2: reaches win
+  about: not reached
+  orphan: dead end
+  trap-a: trap loop
+  trap-b: trap loop
+  trap-c: trap loop

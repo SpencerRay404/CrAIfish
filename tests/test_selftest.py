@@ -14,6 +14,7 @@ from pathcrawl.selftest import (
     fixture_config,
     graph_from_html_files,
     load_expected,
+    run_crawl_and_report_stages,
     run_crawl_stage,
     run_graph_stage,
 )
@@ -55,3 +56,12 @@ def test_crawl_stage_matches_expected():
     failed = [c for c in checks if not c.ok]
     assert not failed, "\n".join(f"{c.mode} {c.metric}: expected {c.expected}, got {c.actual}" for c in failed)
     assert len(checks) == 29
+
+
+@pytest.mark.browser
+def test_report_stage_matches_expected():
+    """Crawl, then report: every report file written and every number and category right."""
+    checks = run_crawl_and_report_stages()
+    failed = [c for c in checks if not c.ok]
+    assert not failed, "\n".join(f"{c.stage} {c.mode} {c.metric}: expected {c.expected}, got {c.actual}" for c in failed)
+    assert len(checks) == 29 + 24

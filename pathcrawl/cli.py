@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from pathcrawl.config import ConfigError, config_warnings, load_config
+from pathcrawl.config import ConfigError, blocking_placeholders, config_warnings, load_config
 
 app = typer.Typer(help="Measure how reachable a conversion goal is from a campaign's entry links.", no_args_is_help=True)
 console = Console()
@@ -68,24 +68,24 @@ def _show(value: object, is_path: bool = False) -> str:
 
 @app.command()
 def selftest(
-    stage: str = typer.Option("all", help="Which stage to run: all, graph or crawl."),
+    stage: str = typer.Option("all", help="Which stage to run: all, graph, crawl or report."),
     headed: bool = typer.Option(False, "--headed", help="Show the browser during the crawl stage."),
 ) -> None:
     """Check every stage against the fixture site's hand-worked numbers (exit 1 on any mismatch)."""
-    from pathcrawl.selftest import FIXTURE_SITE, run_crawl_stage, run_graph_stage
+    from pathcrawl.selftest import FIXTURE_SITE, run_crawl_and_report_stages, run_graph_stage
 
-    if stage not in ("all", "graph", "crawl"):
-        err_console.print("[bold red]selftest:[/] --stage must be all, graph or crawl")
+    if stage not in ("all", "graph", "crawl", "report"):
+        err_console.print("[bold red]selftest:[/] --stage must be all, graph, crawl or report")
         raise typer.Exit(code=2)
 
     checks = []
     try:
         if stage in ("all", "graph"):
             checks += run_graph_stage()
-        if stage in ("all", "crawl"):
+        if stage in ("all", "crawl", "report"):
             console.print("[dim]crawl stage: serving the fixture site locally and crawling it"
                           + (" in a visible browser" if headed else "") + "...[/]")
-            checks += run_crawl_stage(headed=headed, console=console)
+            checks += run_crawl_and_report_stages(headed=headed, console=console, with_report=stage != "crawl")
     except FileNotFoundError as e:
         err_console.print(f"[bold red]selftest:[/] {escape(str(e))}")
         raise typer.Exit(code=2) from None
@@ -128,6 +128,8 @@ def crawl(
     ),
     resume: Path | None = typer.Option(None, "--resume", help="Resume an unfinished run directory."),
     runs_dir: Path = typer.Option(Path("runs"), "--runs-dir", help="Where new run directories go."),
+    max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Override crawl.max_pages for this run."),
+    max_depth: int | None = typer.Option(None, "--max-depth", min=1, help="Override crawl.max_depth for this run."),
 ) -> None:
     """Crawl a campaign from its entry links."""
     from pathcrawl.crawler import Crawler, NonInteractiveOperator, TerminalOperator, new_run_dir, snapshot_config
@@ -151,7 +153,7 @@ def crawl(
         err_console.print(f"[bold red]Config error[/]\n{escape(str(e))}", highlight=False)
         raise typer.Exit(code=1) from None
 
-    placeholders = [w for w in config_warnings(cfg) if "placeholder" in w]
+    placeholders = blocking_placeholders(cfg, camp.id)
     if placeholders:
         for w in placeholders:
             err_console.print(f"[red]error:[/] {escape(w)}", highlight=False)
@@ -161,6 +163,14 @@ def crawl(
     if not resume:
         run_dir = new_run_dir(cfg, camp, runs_dir)
         snapshot_config(config, run_dir)
+    # Limits given on the command line are saved with the run, so --resume keeps them.
+    store = Store(run_dir / "crawl.db")
+    overrides = dict(store.meta("crawl_overrides", {}) or {})
+    overrides.update({k: v for k, v in (("max_pages", max_pages), ("max_depth", max_depth)) if v is not None})
+    store.set_meta(crawl_overrides=overrides)
+    store.close()
+    for key, value in overrides.items():
+        setattr(cfg.crawl, key, value)
     headed = cfg.crawl.headed and not headless
     operator = NonInteractiveOperator() if non_interactive else TerminalOperator(console)
     console.print(f"Run directory: [bold]{escape(str(run_dir))}[/]" + ("  (resuming)" if resume else ""))
@@ -175,6 +185,12 @@ def crawl(
             err_console.print("[bold red]crawl:[/] Chromium is not installed. Run: playwright install chromium")
             raise typer.Exit(code=2) from None
         raise
+    store = Store(run_dir / "crawl.db")
+    loaded = store.explored_count()
+    store.close()
+    if loaded == 0:
+        err_console.print("[bold red]crawl:[/] no pages loaded; see the errors above. Nothing to analyze.")
+        raise typer.Exit(code=1)
     console.print(f"Crawl {status}. Next: pathcrawl analyze --run {escape(str(run_dir))}")
 
 
@@ -184,23 +200,28 @@ def _to_jsonable(value: object) -> object:
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
+def _open(run: Path):
+    from pathcrawl.run import RunError, open_run
+
+    try:
+        return open_run(run)
+    except (RunError, ConfigError) as e:
+        err_console.print(f"[bold red]error:[/] {escape(str(e))}")
+        raise typer.Exit(code=2) from None
+
+
 @app.command()
 def analyze(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
     """Compute every path metric for a crawl and save analysis.json."""
     import json
 
-    from pathcrawl.graph import MODES, analyze as run_analysis, graph_from_store
-    from pathcrawl.store import Store
+    from pathcrawl.graph import MODES
 
-    if not (run / "crawl.db").exists():
-        err_console.print(f"[bold red]analyze:[/] no crawl.db in {escape(str(run))}")
-        raise typer.Exit(code=2)
-    cfg = load_config(run / "config.yaml")
-    store = Store(run / "crawl.db")
-    g, entries = graph_from_store(store)
-    result = run_analysis(g, entries, max_depth=cfg.crawl.max_depth)
+    r = _open(run)
+    result = r.analyze()
     (run / "analysis.json").write_text(json.dumps(result.to_dict(), indent=2, default=_to_jsonable))
 
+    store = r.store
     console.print(
         f"[bold]{escape(str(store.meta('client')))}[/] · {escape(str(store.meta('campaign_name')))} · "
         f"crawl {store.meta('status')} · {store.explored_count()} pages crawled · win pages: {len(result.win_pages)}"
@@ -224,5 +245,39 @@ def analyze(run: Path = typer.Option(..., "--run", help="A run directory from pa
             f"  worst case {m.worst_case.max_clicks} clicks · dead ends {dz.dead_end_count} ({dz.dead_end_pct}%) · "
             f"trap loops {len(dz.trap_loops)} · unknown {len(dz.unknown)} · converged {m.convergence.converged}"
         )
-    store.close()
+    r.close()
     console.print(f"Saved {escape(str(run / 'analysis.json'))}")
+
+
+@app.command()
+def categorize(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
+    """Categorize every crawled page (section, page type, reachability, content signals) into categories.csv."""
+    from pathcrawl.categorize import categorize as categorize_pages
+    from pathcrawl.categorize import summarize, write_csv
+
+    r = _open(run)
+    rows = categorize_pages(r.store, r.graph, r.analyze(), r.config.scope.locale_include)
+    write_csv(rows, run / "categories.csv")
+    summary = summarize(rows)
+    table = Table(title=f"{summary['pages_loaded']} pages by section")
+    for col in ("section", "pages", "reach win (all)", "reach win (content)", "dead/trap (content)"):
+        table.add_column(col)
+    for row in summary["by_section"][:25]:
+        table.add_row(escape(row["section"]), str(row["pages"]), str(row["reach_win_all_links"]),
+                      str(row["reach_win_content_only"]), str(row["dead_or_trap_content_only"]))
+    console.print(table)
+    r.close()
+    console.print(f"Saved {escape(str(run / 'categories.csv'))}")
+
+
+@app.command()
+def report(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
+    """Write report.md, report.json, graph.graphml, paths.mmd and categories.csv for a run."""
+    from pathcrawl.report import headline, write_report
+
+    r = _open(run)
+    paths = write_report(r)
+    console.print(f"[bold]{escape(headline(r.analyze(), r.config.win.name))}[/]")
+    r.close()
+    for name, path in paths.items():
+        console.print(f"  wrote {escape(str(path))}")
