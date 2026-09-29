@@ -1,0 +1,34 @@
+# Test taxonomy for tests/test_entities.py. Thresholds are scaled down for a
+# six-page site: boilerplate is text repeated on 3 or more pages.
+boilerplate:
+  window_words: 8
+  window_min_pages: 3
+  heading_min_pages: 3
+scoring:
+  title_weight: 3
+  heading_weight: 2
+  body_weight: 1
+  body_cap: 5
+  min_score: 1
+coverage:
+  flag_min_pages: 1
+  bridges_per_page: 3
+entities:
+  - type: Industry
+    name: Manufacturing
+    terms: ["manufactur*"]
+  - type: Industry
+    name: Retail
+    terms: ["retail", "retailer*"]
+  - type: Industry
+    name: Healthcare
+    terms: ["healthcare"]
+  - type: Topic
+    name: Inventory
+    terms: ["inventory"]
+  - type: Topic
+    name: Returns
+    terms: ["returns", "return fraud"]
+  - type: Customer
+    name: Acme Motors
+    terms: ["Acme Motors"]

@@ -1,5 +1,7 @@
 """Report outputs for a run: report.md, report.json, graph.graphml, paths.mmd,
-categories.csv, and graph.gexf / graph_content_only.gexf for Gephi.
+categories.csv, and graph.gexf / graph_content_only.gexf for Gephi. When the
+run has entity tags (``pathcrawl entities extract``): page_entities.csv,
+entity_coverage.csv, bridge_links.csv and <client>_knowledge_graph.gexf.
 
 Everything here is formatting. The numbers all come from ``graph.analyze`` and
 ``categorize.categorize``, so the report can never disagree with the analysis.
@@ -15,6 +17,18 @@ from urllib.parse import urlsplit
 import networkx as nx
 
 from pathcrawl.categorize import MODE_LABEL, categorize, summarize, write_csv
+from pathcrawl.coverage import (
+    BridgeLink,
+    EntityCoverage,
+    bridge_links,
+    entity_coverage,
+    knowledge_graph,
+    mode_distances,
+    recommendations_markdown,
+    site_findings,
+    write_dataclass_csv,
+    write_page_entities_csv,
+)
 from pathcrawl.graph import ALL_LINKS, CONTENT_ONLY, MODES, Analysis, distances_to_win, edge_counts, mode_view
 
 DEFINITIONS = {
@@ -45,6 +59,11 @@ DEFINITIONS = {
     "similarity of the pages on their shortest paths.",
     "operator edge": "A jump the operator entered during the crawl ([u]), not a link on the site. Journeys that "
     "need one are ones a real visitor probably could not complete.",
+    "entity": "An industry, segment, service, topic or customer from the client's taxonomy file. A page is tagged "
+    "when the entity's terms appear in its title, headings or body after boilerplate (text repeated across many "
+    "pages, such as menus and cookie banners) is removed.",
+    "bridge link": "A suggested content link from a page more than one click from the win to a page about the "
+    "same entities that links to the win directly, ranked by shared entity score.",
 }
 
 
@@ -322,7 +341,8 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
 # --------------------------------------------------------------------------- markdown
 
 
-def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short) -> str:
+def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
+                    extra_sections: list[str] | None = None) -> str:
     cfg, store = run.config, run.store
     campaign = store.meta("campaign_name") or ""
     win_name = cfg.win.name
@@ -476,12 +496,99 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short)
         add(f"- Win URL where the form did not render: {s['win_form_missing']}")
     add("")
 
+    L.extend(extra_sections or [])
+
     add("## Metric definitions")
     add("")
     for term, text in DEFINITIONS.items():
         add(f"- **{term}**: {text}")
     add("")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- entities
+
+
+def _fmt(v) -> str:
+    return "-" if v is None else str(v)
+
+
+def entity_sections(run, rows, categories, report: dict, paths: dict, out: Path, short) -> list[str]:
+    """Write the entity files, add them to report.json, and return the report.md sections."""
+    from pathcrawl.entities import Taxonomy, load_taxonomy
+
+    meta = run.store.meta("entities", {}) or {}
+    tax_path = meta.get("taxonomy")
+    # the copy saved by the last extraction; it holds the coverage settings
+    tax = load_taxonomy(run.dir / "entities.yaml") if (run.dir / "entities.yaml").exists() else Taxonomy()
+    g = run.graph
+    dist = mode_distances(g)
+    cov = entity_coverage(g, rows, tax.coverage.flag_min_pages, dist)
+    bridges = bridge_links(g, rows, tax.coverage.bridges_per_page, dist)
+
+    slug = run.config.client.slug
+    for name in ("page_entities.csv", "entity_coverage.csv", "bridge_links.csv", f"{slug}_knowledge_graph.gexf"):
+        paths[name] = out / name
+    write_page_entities_csv(rows, paths["page_entities.csv"])
+    write_dataclass_csv(cov, EntityCoverage, paths["entity_coverage.csv"])
+    write_dataclass_csv(bridges, BridgeLink, paths["bridge_links.csv"])
+    nx.write_gexf(knowledge_graph(g, rows, run.entries, categories), paths[f"{slug}_knowledge_graph.gexf"])
+    report["entities"] = {
+        "extraction": meta,
+        "coverage": [c.__dict__ for c in cov],
+        "flagged": [c.__dict__ for c in cov if c.flag],
+        "bridge_links": len(bridges),
+    }
+
+    tagged = len({r["url"] for r in rows})
+    L = ["## Entities: what the content is about, and how far each topic is from the win", ""]
+    L.append(f"{tagged} of {meta.get('pages', '?')} loaded pages carry at least one of {len(cov)} entities "
+             f"({len(rows)} tags; taxonomy `{tax_path or 'entities.yaml'}`). Boilerplate removed first: "
+             f"{meta.get('boilerplate_words_dropped', 0)} repeated words and "
+             f"{meta.get('boilerplate_headings_dropped', 0)} repeated headings. Full lists: `page_entities.csv`, "
+             "`entity_coverage.csv`.")
+    L.append("")
+    L.append("| entity | type | pages | link to win (content) | median clicks (content) | within 2 clicks (content) "
+             "| median clicks (all) | within 2 clicks (all) | flag |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
+    for c in cov[:40]:
+        L.append(f"| {c.entity} | {c.entity_type} | {c.pages_tagged} | {c.pages_linking_win_content} | "
+                 f"{_fmt(c.median_clicks_content)} | {c.pct_within_2_content}% | {_fmt(c.median_clicks_all)} | "
+                 f"{c.pct_within_2_all}% | {'⚠ ' + c.flag if c.flag else ''} |")
+    if len(cov) > 40:
+        L.append(f"| … {len(cov) - 40} more in entity_coverage.csv | | | | | | | | |")
+    L.append("")
+    flagged = [c for c in cov if c.flag]
+    if flagged:
+        L.append(f"**Flagged** (at least {tax.coverage.flag_min_pages} pages, and none or most of them cannot reach "
+                 "the win with content links): " + "; ".join(
+                     f"{c.entity} ({c.entity_type}, {c.no_path_content} of {c.pages_tagged} pages with no path)"
+                     for c in flagged) + ".")
+        L.append("")
+
+    L.append("### Bridge links")
+    L.append("")
+    if bridges:
+        pages = len({b.page for b in bridges})
+        L.append(f"{pages} pages are more than one content click from the win and share entities with a page that "
+                 "links to it. Adding a content link to the suggested page brings each within two clicks. "
+                 "Best suggestion per page, strongest first (all suggestions: `bridge_links.csv`):")
+        L.append("")
+        L.append("| page | clicks now (content) | link to | shared entities | score |")
+        L.append("|---|---|---|---|---|")
+        best = sorted((b for b in bridges if b.rank == 1), key=lambda b: (-b.shared_score, b.page))
+        for b in best[:25]:
+            names = b.shared_entities.split("; ")
+            shared = "; ".join(names[:4]) + (f" (+{len(names) - 4} more)" if len(names) > 4 else "")
+            L.append(f"| {short(b.page)} | {_fmt(b.page_clicks_to_win_content) if b.page_clicks_to_win_content is not None else 'no path'} "
+                     f"| {short(b.bridge_page)} | {shared} | {b.shared_score} |")
+        if len(best) > 25:
+            L.append(f"| … {len(best) - 25} more pages in bridge_links.csv | | | | |")
+    else:
+        L.append("No suggestions: every tagged page is already within one content click of the win, or no page "
+                 "linking to the win shares its entities.")
+    L.append("")
+    return L
 
 
 # --------------------------------------------------------------------------- entry point
@@ -534,8 +641,16 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
         "operator_actions": [dict(r) for r in store.operator_actions()],
         "definitions": DEFINITIONS,
     }
+    extra = []
+    entity_rows = store.page_entities()
+    if entity_rows:
+        extra += entity_sections(run, entity_rows, categories, report, paths, out, short)
+    findings = site_findings(store, categories, [w["url"] for w in report["win_pages"]],
+                             [m["url"] for m in report["win_near_misses"]], entity_rows)
+    report["site_findings"] = findings
+    extra += recommendations_markdown(findings, run.config.win.name)
     paths["report.json"].write_text(json.dumps(report, indent=2, default=lambda v: list(v)), encoding="utf-8")
-    paths["report.md"].write_text(markdown_report(run, analysis, summary, mermaid, short), encoding="utf-8")
+    paths["report.md"].write_text(markdown_report(run, analysis, summary, mermaid, short, extra), encoding="utf-8")
     paths["paths.mmd"].write_text(mermaid, encoding="utf-8")
     nx.write_graphml(graphml_graph(run.graph, categories), paths["graph.graphml"])
     write_csv(categories, paths["categories.csv"])

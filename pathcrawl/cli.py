@@ -130,6 +130,9 @@ def crawl(
     runs_dir: Path = typer.Option(Path("runs"), "--runs-dir", help="Where new run directories go."),
     max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Override crawl.max_pages for this run."),
     max_depth: int | None = typer.Option(None, "--max-depth", min=1, help="Override crawl.max_depth for this run."),
+    taxonomy: Path | None = typer.Option(
+        None, "--taxonomy", help="Entity taxonomy (default: configs/<client>.entities.yaml if it exists)."
+    ),
 ) -> None:
     """Crawl a campaign from its entry links."""
     from pathcrawl.crawler import Crawler, NonInteractiveOperator, TerminalOperator, new_run_dir, snapshot_config
@@ -191,6 +194,8 @@ def crawl(
     if loaded == 0:
         err_console.print("[bold red]crawl:[/] no pages loaded; see the errors above. Nothing to analyze.")
         raise typer.Exit(code=1)
+    if status != "quit":
+        _extract_entities(run_dir, cfg.client.slug, taxonomy)
     ended = {"complete": "Crawl complete.", "budget": "Crawl stopped at the page budget.", "quit": "Crawl paused."}[status]
     next_step = f"pathcrawl crawl --resume {run_dir}" if status == "quit" else f"pathcrawl report --run {run_dir}"
     console.print(f"{ended} Next:")
@@ -275,13 +280,150 @@ def categorize(run: Path = typer.Option(..., "--run", help="A run directory from
 
 
 @app.command()
-def report(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
-    """Write report.md, report.json, graph.graphml, paths.mmd and categories.csv for a run."""
+def report(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    taxonomy: Path | None = typer.Option(
+        None, "--taxonomy", help="Entity taxonomy (default: configs/<client>.entities.yaml, else the run's copy)."
+    ),
+) -> None:
+    """Write every report file for a run (report.md, report.json, graphs, CSVs).
+
+    If an entity taxonomy is found, entities are re-extracted first, so edits
+    to the taxonomy show up in the report without re-crawling."""
     from pathcrawl.report import headline, write_report
 
+    r = _open(run)
+    r.close()
+    _extract_entities(run, r.config.client.slug, taxonomy)
     r = _open(run)
     paths = write_report(r)
     console.print(f"[bold]{escape(headline(r.analyze(), r.config.win.name))}[/]")
     r.close()
     for name, path in paths.items():
         console.print(f"  wrote {escape(str(path))}")
+
+
+# --------------------------------------------------------------------------- entities
+
+entities_app = typer.Typer(help="Tag pages with taxonomy entities, and review LLM-proposed additions.",
+                           no_args_is_help=True)
+app.add_typer(entities_app, name="entities")
+
+
+def _load_taxonomy(path: Path):
+    from pathcrawl.entities import TaxonomyError, load_taxonomy
+
+    try:
+        return load_taxonomy(path)
+    except TaxonomyError as e:
+        err_console.print(f"[bold red]Taxonomy error[/]\n{escape(str(e))}", highlight=False)
+        raise typer.Exit(code=1) from None
+
+
+def _extract_entities(run_dir: Path, slug: str, explicit: Path | None, required: bool = False) -> bool:
+    """Tag the run's pages if a taxonomy is found. Returns whether it ran."""
+    from pathcrawl.entities import extract_run, find_taxonomy
+    from pathcrawl.store import Store
+
+    path = find_taxonomy(run_dir, slug, explicit)
+    if path is None:
+        if required or explicit:
+            err_console.print(f"[bold red]entities:[/] no taxonomy found (looked for "
+                              f"{escape(str(explicit or f'configs/{slug}.entities.yaml'))} and "
+                              f"{escape(str(run_dir / 'entities.yaml'))})")
+            raise typer.Exit(code=2)
+        return False
+    tax = _load_taxonomy(path)
+    store = Store(run_dir / "crawl.db")
+    try:
+        s = extract_run(store, tax, path, run_dir)
+    finally:
+        store.close()
+    console.print(f"Entities ({escape(str(path))}): {s.pages_tagged} of {s.pages} pages tagged, {s.tags} tags, "
+                  f"{s.entities_used} entities; boilerplate removed: {s.boilerplate_words_dropped} words, "
+                  f"{s.boilerplate_headings_dropped} headings", highlight=False, soft_wrap=True)
+    return True
+
+
+@entities_app.command("check")
+def entities_check(taxonomy: Path = typer.Option(..., "--taxonomy", help="Taxonomy YAML to check.")) -> None:
+    """Check that a taxonomy file is valid and summarize it."""
+    from collections import Counter
+
+    tax = _load_taxonomy(taxonomy)
+    counts = Counter(e.type for e in tax.entities)
+    console.print(f"[green]{escape(str(taxonomy))} is valid[/]: {len(tax.entities)} entities ("
+                  + ", ".join(f"{t} {counts.get(t, 0)}" for t in tax.types) + ")", highlight=False)
+
+
+@entities_app.command("extract")
+def entities_extract(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    taxonomy: Path | None = typer.Option(None, "--taxonomy", help="Default: configs/<client>.entities.yaml."),
+) -> None:
+    """Tag every loaded page with taxonomy entities (the page_entities table)."""
+    r = _open(run)
+    r.close()
+    _extract_entities(run, r.config.client.slug, taxonomy, required=True)
+
+
+@entities_app.command("propose")
+def entities_propose(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    taxonomy: Path | None = typer.Option(None, "--taxonomy", help="Default: configs/<client>.entities.yaml."),
+    base_url: str | None = typer.Option(None, "--base-url", help="OpenAI-compatible endpoint (default: taxonomy llm.base_url)."),
+    model: str | None = typer.Option(None, "--model", help="Model name (default: taxonomy llm.model)."),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Only send this many pages (for a trial run)."),
+    out: Path | None = typer.Option(None, "--out", help="Default: <run>/entity_proposals.csv."),
+) -> None:
+    """Ask a local LLM for entities the taxonomy is missing. Writes a CSV for review; changes nothing else."""
+    from pathcrawl.entities import find_taxonomy, source_pages, strip_boilerplate
+    from pathcrawl.propose import OpenAICompatibleClient, propose, write_proposals
+
+    r = _open(run)
+    path = find_taxonomy(run, r.config.client.slug, taxonomy)
+    if path is None:
+        err_console.print("[bold red]entities propose:[/] no taxonomy found; give --taxonomy")
+        raise typer.Exit(code=2)
+    tax = _load_taxonomy(path)
+    pages = strip_boilerplate(source_pages(r.store), tax.boilerplate)
+    r.close()
+    pages = [p for p in pages if p.body.strip()][:limit]
+    client = OpenAICompatibleClient(base_url or tax.llm.base_url, model or tax.llm.model, tax.llm.timeout_s)
+    console.print(f"Sending {len(pages)} pages to {escape(client.model)} at {escape(client.url)} ...")
+    proposals, summary = propose(pages, tax, client,
+                                 progress=lambda url, n: console.print(f"  {n} proposed  {escape(url)}", highlight=False))
+    for e in summary.errors[:5]:
+        err_console.print(f"[yellow]error:[/] {escape(e)}", highlight=False)
+    if summary.errors and summary.pages_sent == len(summary.errors):
+        err_console.print("[bold red]entities propose:[/] the model could not be reached; nothing written.")
+        raise typer.Exit(code=1)
+    out = out or run / "entity_proposals.csv"
+    write_proposals(proposals, out, client.model)
+    console.print(f"{len(proposals)} new entities proposed from {summary.pages_sent} pages "
+                  f"(dropped: {summary.rejected_not_on_page} not on the page, {summary.rejected_known} already known, "
+                  f"{summary.rejected_type} bad type).")
+    console.print(f"Review {escape(str(out))}: set decision to 'accept' on rows to keep, then:")
+    console.print(escape(f"pathcrawl entities accept --proposals {out} --taxonomy {path}"), soft_wrap=True, highlight=False)
+
+
+@entities_app.command("accept")
+def entities_accept(
+    proposals: Path = typer.Option(..., "--proposals", help="A reviewed entity_proposals.csv."),
+    taxonomy: Path = typer.Option(..., "--taxonomy", help="The taxonomy file to add accepted rows to."),
+) -> None:
+    """Add the proposals a reviewer marked 'accept' to the taxonomy file."""
+    from pathcrawl.entities import TaxonomyError
+    from pathcrawl.propose import accept
+
+    try:
+        added = accept(proposals, taxonomy)
+    except TaxonomyError as e:
+        err_console.print(f"[bold red]entities accept:[/] {escape(str(e))}", highlight=False)
+        raise typer.Exit(code=1) from None
+    if not added:
+        console.print("Nothing added: no new rows are marked 'accept'.")
+        return
+    console.print(f"Added {len(added)} entities to {escape(str(taxonomy))}:")
+    for a in added:
+        console.print(f"  {escape(a)}", highlight=False)

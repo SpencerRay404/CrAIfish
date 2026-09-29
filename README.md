@@ -33,6 +33,9 @@ pathcrawl crawl      --config configs/ups.yaml --campaign linkedin-articles
 pathcrawl report     --run runs/ups/linkedin-articles/<timestamp>        # every output file
 pathcrawl analyze    --run <run dir>                                 # just the metrics -> analysis.json
 pathcrawl categorize --run <run dir>                                 # just the page categories -> categories.csv
+pathcrawl entities extract --run <run dir>                           # tag pages with taxonomy entities
+pathcrawl entities propose --run <run dir>                           # local LLM suggests missing entities (for review)
+pathcrawl entities accept  --proposals <csv> --taxonomy <yaml>       # add the reviewed suggestions
 pathcrawl selftest                                                   # the test gate (see below)
 ```
 
@@ -144,6 +147,12 @@ Each crawl writes to `runs/<client>/<campaign>/<timestamp>/`:
 | `paths.mmd` | Mermaid diagram of each entry link's shortest path and nearest dead zone |
 | `categories.csv` | one row per page: section, page type, reachability, content signals |
 | `analysis.json` | the raw metrics, written by `pathcrawl analyze` |
+| `entities.yaml` | copy of the taxonomy the last entity extraction used |
+| `page_entities.csv` | one row per page and entity: type, score, evidence (title, heading, body) |
+| `entity_coverage.csv` | per entity: pages, links to the win, median clicks, share within 2 clicks, flag |
+| `bridge_links.csv` | suggested content links that bring far pages within 2 clicks of the win |
+| `<client>_knowledge_graph.gexf` | pages and entities with mention and link edges, laid out for Gephi |
+| `entity_proposals.csv` | LLM-suggested entities awaiting review, from `pathcrawl entities propose` |
 
 **Gephi.** Open `graph.gexf` (or the less tangled `graph_content_only.gexf`),
 choose "Append to existing workspace" or a new one, and it opens laid out
@@ -191,6 +200,90 @@ Page types come from generic URL patterns (`support`, `tool`, `content`,
 `corporate`, `product/service`, `account`, `home`, `other`; see
 `PAGE_TYPE_RULES` in `pathcrawl/categorize.py`). They are a first cut: check
 `categories.csv` and adjust the rules if a site names things differently.
+
+## Entities and the knowledge graph
+
+The entity layer records what each page is about as typed entities (Industry,
+Segment, Service, Topic, Customer), so journeys and ads can be reasoned about
+by topic rather than by URL.
+
+**Taxonomy.** The entities and the words that signal them live in
+`configs/<client>.entities.yaml`, not in code; `configs/example.entities.yaml`
+documents every setting. When that file exists, entities are extracted
+automatically after each crawl and again before each report, so an edit to
+the taxonomy shows up on the next `pathcrawl report` without re-crawling.
+Check a file with `pathcrawl entities check --taxonomy <file>`.
+
+**Extraction** (`pathcrawl/entities.py`) is deterministic:
+1. Boilerplate is removed first. Any run of 8 words that appears on 30 or more
+   pages is dropped (menus, cookie text, shared modules), and so is any
+   heading on 5 or more pages (e.g. "Related stories"). Headings are taken out
+   of the body text, since they are scored as headings.
+2. Each entity's terms are matched in the title, the remaining headings and
+   the remaining body: `score = 3 × title hits + 2 × heading hits + body hits
+   (at most 5)`. A page is tagged at score 1 or more. `evidence` is the first
+   place it was found, in the order title, heading, body.
+
+Results are stored in the `page_entities` table of `crawl.db`.
+
+**Coverage** (report section and `entity_coverage.csv`). For each entity:
+- pages tagged;
+- pages linking straight to the win;
+- median clicks to the win;
+- share of pages within 2 clicks.
+
+Each is given with content links only and with all links. An entity with at
+least `flag_min_pages` pages is flagged "no path" when none of its pages can
+reach the win through content, or "mostly no path" when most can't.
+
+**Bridge links** (report section and `bridge_links.csv`). Some tagged pages
+are more than one content click from the win, or have no content path at all.
+For each of them, the report lists pages about the same entities that link to
+the win directly. They are ranked by shared entity score: for each shared
+entity, take the lower of the two pages' scores, then add them up. A content
+link to the top suggestion brings the page within two clicks.
+
+**Knowledge graph** (`<client>_knowledge_graph.gexf`). The nodes are pages
+and entities, with `node_type`, `entity_type`, `clicks_to_win` and
+`pages_tagged`. `clicks_to_win` is the content-links distance; for an entity
+it is the rounded median over its pages, and -1 means no path. The edges are:
+- `mention`: page to entity, weighted by score;
+- `link`: page to page, content links only.
+
+Positions are precomputed. Entities are coloured by type and sized by pages
+tagged.
+
+**Suggestions from a local LLM** (optional). `pathcrawl entities propose --run
+<run dir>` sends each page's text, with boilerplate removed, to a local model
+behind an OpenAI-compatible endpoint. The defaults are Ollama at
+`http://localhost:11434/v1` with model `hermes3`. Change them in the
+taxonomy's `llm` section or with `--base-url` and `--model`, and use
+`--limit 20` for a trial. The model is asked for entities and customer names
+the taxonomy lacks.
+
+A proposal is dropped if:
+- its type isn't a taxonomy type;
+- it is already known;
+- none of its terms actually appear on the page.
+
+The rest go to `entity_proposals.csv`, and **nothing else changes**. A reviewer
+sets `decision` to `accept` on the rows to keep, and may edit the name, type
+or terms first. Then:
+
+```bash
+pathcrawl entities accept --proposals <run dir>/entity_proposals.csv --taxonomy configs/<client>.entities.yaml
+```
+
+That appends only the accepted rows to the taxonomy, keeping its comments. It
+checks the result, and restores the file if it no longer loads.
+
+**Site-side recommendations.** Every report ends with recommendations for the
+site itself, backed by this crawl's numbers:
+- structured-data coverage and which schema.org types to add;
+- how many pages depend on JavaScript for their text;
+- consolidating the win and its look-alike URLs into one conversion target;
+- declared page metadata (industry, journey stage, persona) to replace
+  inferred tags.
 
 ## Test gates
 

@@ -30,3 +30,4 @@ jobs:
           pathcrawl validate --config configs/example.yaml
           pathcrawl validate --config configs/ups.yaml
           pathcrawl validate --config configs/demo.yaml
+          for t in configs/*.entities.yaml; do pathcrawl entities check --taxonomy "$t"; done

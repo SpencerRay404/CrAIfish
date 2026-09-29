@@ -13,6 +13,7 @@ Tables:
 - ``aliases``: every requested URL -> the final URL it resolved to (redirects).
 - ``links``: every outbound link found on a page, in scope or not.
 - ``operator_actions``: every decision the operator made, for the audit trail.
+- ``page_entities``: the taxonomy entities each page mentions (``pathcrawl.entities``).
 """
 
 from __future__ import annotations
@@ -83,6 +84,14 @@ CREATE TABLE IF NOT EXISTS operator_actions (
     problem TEXT,
     action TEXT NOT NULL,
     detail TEXT
+);
+CREATE TABLE IF NOT EXISTS page_entities (
+    url TEXT NOT NULL,
+    entity_type TEXT NOT NULL,        -- Industry, Segment, Service, Topic, Customer
+    entity TEXT NOT NULL,
+    score REAL NOT NULL,
+    evidence TEXT NOT NULL,           -- title, heading or body
+    PRIMARY KEY (url, entity_type, entity)
 );
 """
 
@@ -290,3 +299,19 @@ class Store:
 
     def operator_actions(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM operator_actions ORDER BY id").fetchall()
+
+    # ------------------------------------------------------------------ entities
+
+    def replace_page_entities(self, rows) -> None:
+        """Replace every page_entities row with ``rows`` (``PageEntity`` objects)."""
+        with self.db:
+            self.db.execute("DELETE FROM page_entities")
+            self.db.executemany(
+                "INSERT INTO page_entities(url, entity_type, entity, score, evidence) VALUES (?, ?, ?, ?, ?)",
+                [(r.url, r.entity_type, r.entity, r.score, r.evidence) for r in rows],
+            )
+
+    def page_entities(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT url, entity_type, entity, score, evidence FROM page_entities ORDER BY url, entity_type, entity"
+        ).fetchall()
