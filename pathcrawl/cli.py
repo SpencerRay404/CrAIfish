@@ -193,7 +193,9 @@ def crawl(
         raise typer.Exit(code=1)
     ended = {"complete": "Crawl complete.", "budget": "Crawl stopped at the page budget.", "quit": "Crawl paused."}[status]
     next_step = f"pathcrawl crawl --resume {run_dir}" if status == "quit" else f"pathcrawl report --run {run_dir}"
-    console.print(f"{ended} Next: {escape(next_step)}")
+    console.print(f"{ended} Next:")
+    # On its own line and never wrapped, so it can be copied and pasted whole.
+    console.print(escape(next_step), soft_wrap=True, highlight=False)
 
 
 def _to_jsonable(value: object) -> object:
