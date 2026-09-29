@@ -250,6 +250,7 @@ class Crawler:
             campaign_id=self.campaign.id,
             campaign_name=self.campaign.name,
             ad_copy=self.campaign.ad_copy,
+            ad_urls=self.campaign.ad_urls,
             started_at=datetime.now(UTC).isoformat(timespec="seconds"),
             status="running",
         )

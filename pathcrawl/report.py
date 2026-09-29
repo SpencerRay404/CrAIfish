@@ -209,6 +209,9 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short)
     add(f"# {cfg.client.name}: how reachable is the {win_name}?")
     add("")
     add(f"**Campaign:** {campaign}  ")
+    ad_urls = store.meta("ad_urls", []) or []
+    if ad_urls:
+        add(f"**Ads ({len(ad_urls)}, not crawled):** " + " · ".join(f"[{i}]({u})" for i, u in enumerate(ad_urls, 1)) + "  ")
     add(f"**Crawl:** {store.meta('status')} · {store.explored_count()} pages loaded · max depth "
         f"{cfg.crawl.max_depth} · page budget {cfg.crawl.max_pages} · started {store.meta('started_at')}")
     add("")
@@ -365,6 +368,7 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
             "id": store.meta("campaign_id"),
             "name": store.meta("campaign_name"),
             "ad_copy": store.meta("ad_copy"),
+            "ad_urls": store.meta("ad_urls", []),
         },
         "win": {"name": run.config.win.name, "url_patterns": run.config.win.url_patterns},
         "crawl": {

@@ -64,9 +64,14 @@ def test_ups_config():
     from pathcrawl.config import blocking_placeholders
 
     c = load_config(CONFIGS / "ups.yaml")
-    # the site map is ready to crawl; the LinkedIn campaign still has placeholders
+    # both campaigns are ready to crawl
     assert blocking_placeholders(c, "site-map-us-en") == []
-    assert blocking_placeholders(c, "tl-2026-q3-01")
+    assert blocking_placeholders(c, "linkedin-articles") == []
+    articles = c.campaign("linkedin-articles")
+    assert len(articles.entry_links) == 5 and len(articles.ad_urls) == 5
+    # the ads live on LinkedIn, which is never in scope; every entry link is
+    assert not any(c.scope.in_scope(u) for u in articles.ad_urls)
+    assert all(c.scope.in_scope(c.scope.normalize(e.url)) for e in articles.entry_links)
     # /us/en/ applies to www.ups.com but not solutions.ups.com, where the win lives
     assert c.scope.in_scope("https://www.ups.com/us/en/shipping.page")
     assert not c.scope.in_scope("https://www.ups.com/gb/en/shipping.page")
@@ -227,7 +232,12 @@ def test_cli_validate(tmp_path):
     runner = CliRunner()
     ok = runner.invoke(app, ["validate", "--config", str(CONFIGS / "ups.yaml")])
     assert ok.exit_code == 0, ok.output
-    assert "is valid" in ok.output and "warning" in ok.output
+    assert "is valid" in ok.output and "warning" not in ok.output
+
+    placeholder = tmp_path / "placeholder.yaml"
+    placeholder.write_text(yaml.safe_dump(cfg(win={"url_patterns": ["https://www.acme.test/en/REPLACE-ME"]})))
+    warned = runner.invoke(app, ["validate", "--config", str(placeholder)])
+    assert warned.exit_code == 0 and "warning" in warned.output and "REPLACE-ME" in warned.output
 
     bad = tmp_path / "bad.yaml"
     bad.write_text(yaml.safe_dump(cfg(crawl={"max_pages": 0})))

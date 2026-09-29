@@ -168,6 +168,9 @@ class CampaignConfig(_Strict):
     name: str = Field(min_length=1)
     platform: str = Field(min_length=1)
     ad_copy: str = Field(min_length=1)
+    # Where the ad itself lives (e.g. LinkedIn posts). Recorded in the report,
+    # never crawled: the crawl starts at entry_links.
+    ad_urls: list[str] = []
     entry_links: list[EntryLink] = Field(min_length=1)
 
 

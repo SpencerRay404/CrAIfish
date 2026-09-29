@@ -5,9 +5,14 @@
 #   pathcrawl crawl  --config configs/ups.yaml --campaign site-map-us-en --headless
 #   pathcrawl report --run runs/ups/site-map-us-en/<timestamp>
 #
-# Campaign "tl-2026-q3-01" is the LinkedIn thought-leadership ad; it still has
-# REPLACE-ME placeholders until the ad text and its links are filled in, and
-# `pathcrawl crawl` refuses to run it until then.
+# Campaign "linkedin-articles" starts from the UPS pages that five LinkedIn
+# thought-leadership articles send people to (the articles themselves are
+# listed under ad_urls and never crawled):
+#   pathcrawl crawl  --config configs/ups.yaml --campaign linkedin-articles
+#   pathcrawl report --run runs/ups/linkedin-articles/<timestamp>
+#
+# www.ups.com answered a headless browser with a file download instead of the
+# home page, so run UPS crawls with the visible browser (the default).
 
 client:
   name: "UPS"
@@ -52,16 +57,32 @@ campaigns:
       - label: "Manufacturing solutions page"
         url: "https://solutions.ups.com/manufacturing-ussp-page.html"
 
-  - id: "tl-2026-q3-01"
-    name: "Thought leadership ad 1 (LinkedIn: integrated supply chain risk management)"
+  - id: "linkedin-articles"
+    name: "LinkedIn thought-leadership articles (5) and the UPS pages they send people to"
     platform: "linkedin"
     ad_copy: |
-      REPLACE-ME: paste the full text of the LinkedIn article here.
+      Five LinkedIn thought-leadership articles: integrated supply chain risk
+      management for manufacturing; reducing retail return fraud without adding
+      friction; luxury goods logistics; micro-fulfillment centers in retail;
+      new UPS tools for small business shippers. Their UPS landing pages are
+      the entry links below.
+    ad_urls:
+      - "https://www.linkedin.com/pulse/how-integrated-supply-chain-risk-management-helps-protect-manufacturing-dctnc/"
+      - "https://www.linkedin.com/pulse/reducing-retail-return-fraud-without-adding-friction-ups-edmzc/"
+      - "https://www.linkedin.com/pulse/how-luxury-goods-logistics-delivers-tailored-shipping-experiences-d8lxc/"
+      - "https://www.linkedin.com/pulse/from-store-door-how-micro-fulfillment-centers-transforming-retail-roftc/"
+      - "https://www.linkedin.com/pulse/ups-experts-break-down-new-tools-small-business-shippers-ups-8lunc/"
     entry_links:
-      - label: "REPLACE-ME link 1"
-        url: "https://www.ups.com/us/en/REPLACE-ME-1"
-      - label: "REPLACE-ME link 2"
-        url: "https://www.ups.com/us/en/REPLACE-ME-2"
+      - label: "RFID network story (about.ups.com)"
+        url: "https://about.ups.com/us/en/our-stories/customer-first/lighting-up-our-u-s--network-end-to-end-with-rfid.html"
+      - label: "Logistics solutions"
+        url: "https://www.ups.com/us/en/supplychain/logistics-solutions"
+      - label: "Inventory optimization (manufacturing)"
+        url: "https://www.ups.com/us/en/customized-shipping-logistic-services/manufacturing-logistics-services/business-benefits-of-inventory-optimization"
+      - label: "Omnichannel customer loyalty (retail)"
+        url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/win-customer-loyalty-with-omnichannel-retail-strategies"
+      - label: "Mastering omnichannel strategy (retail)"
+        url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/mastering-your-omnichannel-strategy-for-retail-growth"
 
 crawl:
   max_depth: 8

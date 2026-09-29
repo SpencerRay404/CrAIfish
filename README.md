@@ -29,8 +29,8 @@ pytest
 
 ```bash
 pathcrawl validate   --config configs/ups.yaml                       # check a config
-pathcrawl crawl      --config configs/ups.yaml --campaign tl-2026-q3-01
-pathcrawl report     --run runs/ups/tl-2026-q3-01/<timestamp>        # every output file
+pathcrawl crawl      --config configs/ups.yaml --campaign linkedin-articles
+pathcrawl report     --run runs/ups/linkedin-articles/<timestamp>        # every output file
 pathcrawl analyze    --run <run dir>                                 # just the metrics -> analysis.json
 pathcrawl categorize --run <run dir>                                 # just the page categories -> categories.csv
 pathcrawl selftest                                                   # the test gate (see below)
@@ -246,8 +246,10 @@ the output directory `runs/<slug>/...`.
   When true, the form must be present.
 
 ### `campaigns`
-Each campaign is one ad. `id` names the output directory. `ad_copy` is the full
-ad text, stored for later relevance scoring. `entry_links` are the links inside
+Each campaign is one ad (or a set of related ads). `id` names the output
+directory. `ad_copy` is the full ad text, stored for later relevance scoring.
+`ad_urls` (optional) lists where the ads live, such as LinkedIn posts; they're
+shown in the report and never crawled. `entry_links` are the links inside
 the ad, each with a `label` (the anchor text or a description) and a `url`.
 
 Entry links must start on an allowed domain. If the ad uses a link shortener
