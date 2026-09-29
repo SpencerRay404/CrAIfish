@@ -39,5 +39,5 @@ def open_run(run_dir: str | Path) -> Run:
     store = Store(run_dir / "crawl.db")
     for key, value in (store.meta("crawl_overrides", {}) or {}).items():
         setattr(config.crawl, key, value)
-    graph, entries = graph_from_store(store)
+    graph, entries = graph_from_store(store, config.win)
     return Run(run_dir, config, store, graph, entries)

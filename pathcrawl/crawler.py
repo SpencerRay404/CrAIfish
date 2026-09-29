@@ -46,6 +46,9 @@ DOWNLOAD = "file download instead of a page"
 
 RETRY, SKIP, GOTO_URL, MARK_WIN, QUIT = "retry", "skip", "url", "win", "quit"
 
+# Page status for a win URL the crawler recorded without loading it.
+NOT_FETCHED = "not_fetched"
+
 
 @dataclass
 class Problem:
@@ -327,7 +330,7 @@ class Crawler:
         counts = {r[0]: r[1] for r in rows}
         loaded = counts.get("ok", 0) + counts.get("http_error", 0)
         failed = counts.get("skipped", 0)
-        parts = [f"{loaded} pages loaded"] + [f"{n} {k}" for k, n in sorted(counts.items()) if k not in ("ok", "http_error")]
+        parts = [f"{loaded} pages loaded"] + [f"{n} {k.replace('_', ' ')}" for k, n in sorted(counts.items()) if k not in ("ok", "http_error")]
         wins = self.store.db.execute("SELECT COUNT(*) FROM pages WHERE win = 1").fetchone()[0]
         parts.append(f"{wins} win page{'s' if wins != 1 else ''} found")
         if loaded == 0 and failed:
@@ -463,19 +466,31 @@ class Crawler:
         except Exception:
             return None
 
-    def _save_failed(self, url: str, depth: int, status: str, error: str, win: bool = False) -> None:
+    def _save_failed(self, url: str, depth: int, status: str, error: str, win: bool = False,
+                     win_source: str = "operator") -> None:
         self.store.save_page(
             PageRecord(url=url, requested_url=url, status=status, depth=depth, error=error,
-                       win=win, win_source="operator" if win else None),
+                       win=win, win_source=win_source if win else None),
             [],
             queue_url=url,
         )
 
     def _process(self, url: str, depth: int) -> None:
         is_entry = self.store.is_entry(url)
+        # A URL matching the win patterns is a win whether or not it can be loaded.
+        url_win = self.config.win.url_matches(url)
         if not self.robots.allowed(url):
-            self._save_failed(url, depth, "robots", "disallowed by robots.txt")
-            self._log(depth, "robots", url, "skipped: disallowed by robots.txt")
+            self._save_failed(url, depth, "robots", "disallowed by robots.txt", win=url_win, win_source="pattern")
+            self._log(depth, "robots", url, "skipped: disallowed by robots.txt"
+                      + (" · win matched by URL, not loaded" if url_win else ""), win=url_win)
+            return
+        if url_win and not self.config.win.require_form:
+            # The win is the goal, so the journey ends here: nothing to load and
+            # nothing past it to follow. (With require_form it is loaded to
+            # check the form, but its links are still not followed.)
+            self._save_failed(url, depth, NOT_FETCHED, "win page: matched by URL; the crawl stops at the win",
+                              win=True, win_source="pattern")
+            self._log(depth, "win", url, "matched by URL; not loaded, links not followed", win=True)
             return
 
         while True:  # retried on operator request
@@ -555,7 +570,8 @@ class Crawler:
             self.store.update_entry(url, new_node_url=final, status="ok")
 
         new = 0
-        if depth + 1 <= self.config.crawl.max_depth:
+        # Wins are terminal: their links are recorded but never followed.
+        if depth + 1 <= self.config.crawl.max_depth and not record.win:
             for target in sorted(crawlable):
                 new += self.store.enqueue(self.store.resolve(target), depth + 1, final)
         self._log(depth, visit.http_status, final,

@@ -15,6 +15,7 @@ import re
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import soupsieve
 import yaml
@@ -122,6 +123,10 @@ class WinConfig(_Strict):
     # When false (the default), a page matching url_patterns is a win even if
     # form_selector is not found; the report flags it as "form not rendered".
     require_form: bool = False
+    # Words that make a URL "look like" the win. The report warns about pages
+    # containing one that match no url_pattern (a variant the patterns miss).
+    # Left empty, they are derived from the patterns (see keywords()).
+    near_miss_keywords: list[str] = []
 
     @field_validator("url_patterns")
     @classmethod
@@ -156,6 +161,35 @@ class WinConfig(_Strict):
             elif fnmatchcase(url, p):
                 return True
         return False
+
+    def keywords(self) -> list[str]:
+        """Lowercase words that make a URL look like the win.
+
+        ``near_miss_keywords`` if set; otherwise, for each glob pattern, the
+        first two words of its last path segment before any wildcard, e.g.
+        ``virtual-consultation`` from ``.../virtual-consultation-us-en*``
+        (one word if that is all there is). Regex patterns contribute nothing.
+        """
+        if self.near_miss_keywords:
+            return sorted({k.lower() for k in self.near_miss_keywords if k.strip()})
+        out = set()
+        for p in self.url_patterns:
+            if p.startswith(REGEX_PREFIX):
+                continue
+            segment = re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/").rsplit("/", 1)[-1].lower()
+            segment = re.sub(r"\.[a-z0-9]+$", "", segment)
+            words = list(re.finditer(r"[a-z0-9]{3,}", segment))
+            if words:
+                out.add(segment[words[0].start():words[min(1, len(words) - 1)].end()])
+        return sorted(out)
+
+    def near_miss(self, url: str) -> bool:
+        """True if ``url`` looks like the win (a keyword in its path) but
+        matches no url_pattern."""
+        if self.url_matches(url):
+            return False
+        path = urlsplit(url).path.lower()
+        return any(k in path for k in self.keywords())
 
 
 class EntryLink(_Strict):

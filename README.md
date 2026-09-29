@@ -119,6 +119,14 @@ The only thing it clicks is a cookie-consent button. It never fills in or
 submits a form and never logs in. It obeys robots.txt (unless
 `respect_robots: false`) and waits `delay_ms` between pages.
 
+**The win is the end of the journey.** A URL matching `win.url_patterns` is a
+win as soon as a crawled page links to it. The crawler records it without
+loading it (status `not_fetched`) and never follows its links. A win URL that
+robots.txt forbids is still a win (status `robots`). The report says which
+wins were matched by URL but not loaded, since the link is confirmed but the
+form itself wasn't checked. With `require_form: true` the win is loaded to
+check the form, and its links are still not followed.
+
 ### Run directory
 
 Each crawl writes to `runs/<client>/<campaign>/<timestamp>/`:
@@ -130,10 +138,23 @@ Each crawl writes to `runs/<client>/<campaign>/<timestamp>/`:
 | `screenshots/` | one full-page JPEG per page |
 | `report.md` | the human-readable report (see below) |
 | `report.json` | every metric, the categories summary, crawl facts, operator actions |
-| `graph.graphml` | the full link graph for Gephi or similar |
+| `graph.graphml` | the full link graph with page attributes, no layout |
+| `graph.gexf` | the full link graph laid out for Gephi (see below) |
+| `graph_content_only.gexf` | the same without nav, header and footer links |
 | `paths.mmd` | Mermaid diagram of each entry link's shortest path and nearest dead zone |
 | `categories.csv` | one row per page: section, page type, reachability, content signals |
 | `analysis.json` | the raw metrics, written by `pathcrawl analyze` |
+
+**Gephi.** Open `graph.gexf` (or the less tangled `graph_content_only.gexf`),
+choose "Append to existing workspace" or a new one, and it opens laid out
+instead of stacked on one point. Positions come from a weighted spring layout
+(content links pull harder than nav links). Size follows how many pages link
+in. Colour shows the role: blue entry, green win, grey crawled, orange not
+crawled. Only entries, wins and the ten most-linked pages are labelled. Edges
+carry `region` (body, nav, header, footer, or several) and `content_link`.
+Node attributes include `role`, `section`, `page_type`, `status` and
+`in_degree`, for filtering and partitioning. To re-run the layout in Gephi,
+ForceAtlas 2 with "Prevent overlap" works well.
 
 At the end of every crawl the terminal prints a summary (pages loaded, skipped,
 win pages found). If nothing loaded at all it says so in red with the first
@@ -243,7 +264,14 @@ the output directory `runs/<slug>/...`.
   rendered on the page.
 - **`require_form`** (default `false`): when false, a URL match counts as a win
   even if the form is missing, and the report flags it as "form not rendered".
-  When true, the form must be present.
+  When false the win is never loaded at all (see "The win is the end of the
+  journey"). When true, the win is loaded and the form must be present.
+- **`near_miss_keywords`** (optional): words that make a URL look like the win.
+  The report warns about pages whose path contains one but matches no pattern
+  (a variant the patterns miss, such as `virtual-consultation-2023-...` next
+  to `virtual-consultation-us-en*`). By default they come from the patterns:
+  the first two words of each glob's last path segment.
+  List several patterns if several pages count as the win.
 
 ### `campaigns`
 Each campaign is one ad (or a set of related ads). `id` names the output

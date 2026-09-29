@@ -1,5 +1,5 @@
 """Report outputs for a run: report.md, report.json, graph.graphml, paths.mmd,
-categories.csv.
+categories.csv, and graph.gexf / graph_content_only.gexf for Gephi.
 
 Everything here is formatting. The numbers all come from ``graph.analyze`` and
 ``categorize.categorize``, so the report can never disagree with the analysis.
@@ -20,7 +20,9 @@ from pathcrawl.graph import ALL_LINKS, CONTENT_ONLY, MODES, Analysis, distances_
 DEFINITIONS = {
     "click": "Following one link. A path of N clicks visits N+1 pages.",
     "win page": "A page whose URL matches win.url_patterns (and, if require_form is set, shows the win form), "
-    "or a page the operator marked as a win.",
+    "or a page the operator marked as a win. A URL that matches is a win even if it was never loaded (for example "
+    "because robots.txt forbids it): a link to it is enough. The win ends the journey, so its own links are not "
+    "followed.",
     "all links": "Every link counts, including the site navigation, header and footer.",
     "content links only": "Links in the nav, header and footer are ignored. This shows whether the content itself "
     "guides people to the win, rather than a global menu link that makes every page look one click away.",
@@ -196,6 +198,127 @@ def graphml_graph(g: nx.DiGraph, categories) -> nx.DiGraph:
     return out
 
 
+# --------------------------------------------------------------------------- win pages
+
+
+NOT_FETCHED_REASONS = {
+    "robots": "blocked by robots.txt",
+    "not_fetched": "the crawl stops at the win, so it is not loaded",
+    None: "linked, but the crawl never reached it",
+}
+
+
+def win_pages(run) -> list[dict]:
+    """Every win page in the graph, whether it was loaded and, if not, why."""
+    rows = {r["url"]: r for r in run.store.pages()}
+    out = []
+    for n, d in sorted(run.graph.nodes(data=True)):
+        if not d["win"]:
+            continue
+        row = rows.get(n)
+        status = row["status"] if row else None
+        fetched = bool(d["explored"])
+        reason = None
+        if not fetched:
+            reason = NOT_FETCHED_REASONS.get(status) or (row["error"] if row and row["error"] else status)
+        out.append({
+            "url": n,
+            "win_source": d["win_source"],
+            "status": status,
+            "fetched": fetched,
+            "not_fetched_reason": reason,
+            "form_present": None if not row or row["form_present"] is None else bool(row["form_present"]),
+            "linked_from": run.graph.in_degree(n),
+        })
+    return out
+
+
+def near_misses(run) -> list[dict]:
+    """Pages that look like the win (a win keyword in the URL path) but match no
+    win pattern: probably a variant the patterns should include."""
+    win = run.config.win
+    return [
+        {"url": n, "linked_from": run.graph.in_degree(n)}
+        for n in sorted(run.graph)
+        if not run.graph.nodes[n]["win"] and win.near_miss(n)
+    ]
+
+
+# --------------------------------------------------------------------------- gephi
+
+ROLE_COLORS = {
+    "entry": (31, 119, 180),     # blue
+    "win": (44, 160, 44),        # green
+    "crawled": (150, 150, 150),  # grey
+    "uncrawled": (255, 160, 60), # orange
+}
+TOP_HUBS = 10
+
+
+def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, seed: int = 42) -> nx.DiGraph:
+    """A copy of the graph laid out for Gephi.
+
+    Positions come from a weighted spring layout (content links pull harder
+    than nav/header/footer links), node size grows with in-degree, colour shows
+    the role (entry, win, crawled, uncrawled), and only entries, wins and the
+    top hubs are labelled. With ``content_only`` the nav/header/footer links
+    are left out, and so are pages that are then unconnected (entries and wins
+    always stay).
+    """
+    by_url = {c.url: c for c in categories}
+    entry_urls = {e.url for e in entries}
+    out = nx.DiGraph()
+    for u, v, d in g.edges(data=True):
+        content = edge_counts(d, CONTENT_ONLY, include_operator=False)
+        if content_only and not (content or d["operator"]):
+            continue
+        out.add_edge(
+            u, v,
+            region=",".join(sorted(d["regions"])) or "operator",
+            content_link=content,
+            operator=bool(d["operator"]),
+            weight=1.0 if content or d["operator"] else 0.2,
+        )
+    keep = set(out) if content_only else set(g)
+    keep |= {n for n in g if n in entry_urls or g.nodes[n]["win"]}
+    out.add_nodes_from(sorted(keep))
+
+    def role(n):
+        d = g.nodes[n]
+        if n in entry_urls:
+            return "entry"
+        if d["win"]:
+            return "win"
+        return "crawled" if d["explored"] else "uncrawled"
+
+    indeg = dict(out.in_degree())
+    max_in = max(indeg.values(), default=0) or 1
+    hubs = set(sorted((n for n in out if role(n) in ("crawled", "uncrawled")), key=lambda n: (-indeg[n], n))[:TOP_HUBS])
+    layout = nx.spring_layout(
+        out.to_undirected(as_view=True), weight="weight", seed=seed,
+        iterations=100 if len(out) <= 2000 else 50,
+    ) if len(out) else {}
+    for n in out:
+        c, r = by_url.get(n), role(n)
+        red, green, blue = ROLE_COLORS[r]
+        x, y = (float(v) for v in layout[n])
+        out.nodes[n].update(
+            label=(c.title if c and c.title else n) if (r in ("entry", "win") or n in hubs) else "",
+            role=r,
+            in_degree=indeg[n],
+            title=(c.title or "") if c else "",
+            section=c.section if c else "",
+            page_type=c.page_type if c else "",
+            status=g.nodes[n].get("status") or "",
+            viz={
+                "color": {"r": red, "g": green, "b": blue, "a": 1.0},
+                "size": round(4 + 36 * (indeg[n] / max_in) ** 0.5, 2),
+                "position": {"x": round(x * 1000, 2), "y": round(y * 1000, 2), "z": 0.0},
+            },
+        )
+    return out
+
+
 # --------------------------------------------------------------------------- markdown
 
 
@@ -216,6 +339,26 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short)
         f"{cfg.crawl.max_depth} · page budget {cfg.crawl.max_pages} · started {store.meta('started_at')}")
     add("")
     add(f"> {headline(analysis, win_name)}")
+    add("")
+    for w in win_pages(run):
+        if w["fetched"]:
+            form = {True: "form found", False: "form not rendered", None: "form not checked"}[w["form_present"]]
+            add(f"- Win page {w['url']}: loaded ({form}).")
+        else:
+            add(f"- Win page {w['url']}: win page not fetched: {w['not_fetched_reason']}. It was matched by URL, "
+                f"so the link to it ({w['linked_from']} page{'s' if w['linked_from'] != 1 else ''} link here) "
+                "is confirmed, but the form itself was not checked.")
+    misses = near_misses(run)
+    if misses:
+        add("")
+        add(f"> ⚠ {len(misses)} page{'s look' if len(misses) != 1 else ' looks'} like the win "
+            f"(URL contains {' / '.join(repr(k) for k in run.config.win.keywords())}) but "
+            f"match{'es' if len(misses) == 1 else ''} no win pattern, so {'they are' if len(misses) != 1 else 'it is'} "
+            "not counted as wins. Add a pattern to win.url_patterns if they should be:")
+        for m in misses[:20]:
+            add(f">  - {m['url']} (linked from {m['linked_from']} page{'s' if m['linked_from'] != 1 else ''})")
+        if len(misses) > 20:
+            add(f">  - … and {len(misses) - 20} more (see report.json)")
     add("")
 
     add("## Entry links")
@@ -359,6 +502,8 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
         "graph.graphml": out / "graph.graphml",
         "paths.mmd": out / "paths.mmd",
         "categories.csv": out / "categories.csv",
+        "graph.gexf": out / "graph.gexf",
+        "graph_content_only.gexf": out / "graph_content_only.gexf",
     }
     store = run.store
     statuses = dict(store.db.execute("SELECT status, COUNT(*) FROM pages GROUP BY status").fetchall())
@@ -371,6 +516,8 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
             "ad_urls": store.meta("ad_urls", []),
         },
         "win": {"name": run.config.win.name, "url_patterns": run.config.win.url_patterns},
+        "win_pages": win_pages(run),
+        "win_near_misses": near_misses(run),
         "crawl": {
             "status": store.meta("status"),
             "started_at": store.meta("started_at"),
@@ -392,4 +539,6 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     paths["paths.mmd"].write_text(mermaid, encoding="utf-8")
     nx.write_graphml(graphml_graph(run.graph, categories), paths["graph.graphml"])
     write_csv(categories, paths["categories.csv"])
+    for name, content_only in (("graph.gexf", False), ("graph_content_only.gexf", True)):
+        nx.write_gexf(gexf_graph(run.graph, run.entries, categories, content_only), paths[name])
     return paths

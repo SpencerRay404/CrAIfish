@@ -26,7 +26,8 @@ Self-links (the win page's own nav link, about's own footer link) are dropped.
 ## Expected results
 
 Entry links: `entry-near.html` and `entry-far.html`. Default `max_depth` = 8.
-10 pages are crawled, all explored.
+9 pages are crawled. `win.html` is recorded as the win but never loaded, since
+the journey ends there, so its links (including its footer link) don't count.
 
 | metric | all links | content only |
 |---|---|---|
@@ -38,7 +39,7 @@ Entry links: `entry-near.html` and `entry-far.html`. Default `max_depth` = 8.
 | longest simple, entry-far, `max_depth` 4 | 4: far → article-1 → article-2 → about → win | 3 |
 | worst-case distance | 1 (8 pages) | 3 (entry-far) |
 | distribution {clicks: pages} | {0: 1, 1: 8} | {0: 1, 1: 2, 2: 1, 3: 1} |
-| dead ends | orphan (1, 10.0%) | orphan, trap-a, trap-b, trap-c (4, 40.0%) |
+| dead ends | orphan (1 of 9, 11.1%) | orphan, trap-a, trap-b, trap-c (4 of 9, 44.4%) |
 | trap loops | none | [trap-a, trap-b, trap-c] |
 | dead zone hit, entry-near | click 1 (orphan) | click 1 (orphan) |
 | dead zone hit, entry-far | never | click 2 (trap-a) |

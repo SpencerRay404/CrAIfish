@@ -140,7 +140,7 @@ def categorize(store, g: nx.DiGraph, analysis: Analysis, locale_include: list[st
             continue
         jsonld = json.loads(page["jsonld_types"]) if page["jsonld_types"] else []
         headings = json.loads(page["headings"]) if page["headings"] else []
-        is_win = bool(page["win"])
+        is_win = bool(g.nodes[url]["win"])
         section = section_of(url, locale_include)
         explored = page["status"] in ("ok", "http_error")
         (labels_all, dist_all), (labels_content, dist_content) = reach["all_links"], reach["content_only"]

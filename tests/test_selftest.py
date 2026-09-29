@@ -36,7 +36,7 @@ def test_gate_catches_a_wrong_number():
     wrong = copy.deepcopy(expected)
     wrong["modes"]["content_only"]["shortest_path"]["far"] = ["entry-far", "win"]
     wrong["modes"]["content_only"]["trap_loops"] = []
-    failed = [c for c in compare(analysis, wrong, FIXTURE_BASE, "graph", 10) if not c.ok]
+    failed = [c for c in compare(analysis, wrong, FIXTURE_BASE, "graph", expected["crawled_pages"]) if not c.ok]
     assert [(c.mode, c.metric) for c in failed] == [
         ("content_only", "shortest path (far)"),
         ("content_only", "trap loops"),
@@ -64,4 +64,4 @@ def test_report_stage_matches_expected():
     checks = run_crawl_and_report_stages()
     failed = [c for c in checks if not c.ok]
     assert not failed, "\n".join(f"{c.stage} {c.mode} {c.metric}: expected {c.expected}, got {c.actual}" for c in failed)
-    assert len(checks) == 29 + 24
+    assert len(checks) == 29 + 28

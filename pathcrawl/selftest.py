@@ -77,12 +77,15 @@ def load_expected(site: Path = FIXTURE_SITE) -> dict[str, Any]:
 def graph_from_html_files(cfg: Config, site: Path = FIXTURE_SITE, base: str = FIXTURE_BASE) -> nx.DiGraph:
     """Build the graph straight from the fixture's HTML files, the way the
     crawler will from rendered pages: extract links, keep in-scope ones,
-    mark wins by URL pattern."""
+    mark wins by URL pattern. Like the crawler, a win page is recorded but not
+    loaded (it is the goal), so it is unexplored and its links are ignored."""
     pages, edges = [], []
     for f in sorted(site.glob("*.html")):
         url = cfg.scope.normalize(base + f.name)
         win = cfg.win.url_matches(url)
-        pages.append(Page(url=url, win=win, win_source="pattern" if win else None))
+        pages.append(Page(url=url, explored=not win, win=win, win_source="pattern" if win else None))
+        if win:
+            continue
         for link in extract_links(
             f.read_text(), url, cfg.scope.strip_query_params, cfg.scope.region_selectors.model_dump()
         ):
@@ -222,6 +225,12 @@ def run_report_stage(run_dir: Path, base: str, site: Path = FIXTURE_SITE) -> lis
     mmd = paths["paths.mmd"].read_text()
     checks.append(Check("report", "-", "paths.mmd marks the win and a dead zone",
                         True, "class " in mmd and " win" in mmd and " dead" in mmd))
+    checks.append(Check("report", "-", "report.md says the win was matched by URL but not loaded",
+                        True, "win page not fetched: the crawl stops at the win" in paths["report.md"].read_text()))
+    gexf = nx.read_gexf(paths["graph.gexf"])
+    checks.append(Check("report", "-", "graph.gexf has a position, size and colour for every page",
+                        True, len(gexf) > 0 and all({"position", "size", "color"} <= set(d.get("viz", {}))
+                                                     for _, d in gexf.nodes(data=True))))
     return checks
 
 
@@ -253,7 +262,7 @@ def _crawl(site: Path, headed: bool, run_dir: Path, console) -> tuple[list[Check
             console=console or Console(quiet=True), headed=headed,
         )
         crawler.run()
-        g, entries = graph_from_store(crawler.store)
+        g, entries = graph_from_store(crawler.store, cfg.win)
         crawled = crawler.store.explored_count()
         crawler.store.close()
         analysis = analyze(g, entries, max_depth=expected["max_depth"])

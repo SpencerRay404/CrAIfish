@@ -16,6 +16,8 @@ dependencies = [
     "pyyaml>=6.0",
     "typer>=0.12",
     "rich>=13.7",
+    "numpy>=1.26",  # spring layout for the Gephi export
+    "scipy>=1.11",  # networkx uses it for layouts of 500+ pages
 ]
 
 [project.optional-dependencies]

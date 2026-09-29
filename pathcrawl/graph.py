@@ -8,13 +8,17 @@ Terms used throughout (repeated in the report):
 
 - **Click**: following one link. A path of N clicks visits N+1 pages.
 - **Win page**: a page matching ``win.url_patterns`` or marked as a win by the
-  operator.
+  operator. A URL that matches the patterns is a win whether or not the crawler
+  loaded it (robots.txt may forbid it, or the crawl never fetched it): a link to
+  it is all a journey needs. The win is the goal, so it is terminal: its own
+  outbound links are never followed, crawled or counted.
 - **Mode**: every metric is computed twice. ``all_links`` counts every link;
   ``content_only`` ignores links in the nav, header and footer, so a global
   "Contact us" link does not make every page look one click from the win.
 - **Explored page**: a page the crawler loaded, so its outbound links are known.
   Pages that were discovered but never loaded (page budget, depth limit,
-  skipped by the operator) are **unexplored**.
+  skipped by the operator) are **unexplored**. Win pages are never counted as
+  unexplored, because nothing past them matters.
 - **Dead end**: an explored page that provably cannot reach a win page.
   Every page reachable from it is explored and none is a win. A page whose
   only hope runs through unexplored pages is **unknown**, not a dead end.
@@ -106,7 +110,11 @@ def edge_counts(data: dict, mode: str, include_operator: bool = True) -> bool:
 def mode_view(g: nx.DiGraph, mode: str, include_operator: bool = True) -> nx.DiGraph:
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}")
-    return nx.subgraph_view(g, filter_edge=lambda u, v: edge_counts(g.edges[u, v], mode, include_operator))
+    # Win pages are terminal: the journey ends there, so their outbound links never count.
+    return nx.subgraph_view(
+        g,
+        filter_edge=lambda u, v: not g.nodes[u]["win"] and edge_counts(g.edges[u, v], mode, include_operator),
+    )
 
 
 def _is_operator_only(g: nx.DiGraph, u: str, v: str, mode: str) -> bool:
@@ -351,11 +359,12 @@ def analyze_mode(
     for s in starts:
         reachable |= nx.descendants(h, s)
 
-    unexplored = {n for n in g if not g.nodes[n]["explored"]}
+    # A win is the goal, never "unexplored", even when it was not loaded.
+    unexplored = {n for n in g if not g.nodes[n]["explored"] and not g.nodes[n]["win"]}
     can_reach_unexplored = _reverse_reachable(h, unexplored)
-    explored_reachable = sorted(n for n in reachable if g.nodes[n]["explored"])
-    dead = [n for n in explored_reachable if n not in dist and n not in can_reach_unexplored]
-    unknown = [n for n in explored_reachable if n not in dist and n in can_reach_unexplored]
+    settled_reachable = sorted(n for n in reachable if g.nodes[n]["explored"] or g.nodes[n]["win"])
+    dead = [n for n in settled_reachable if n not in dist and n not in can_reach_unexplored]
+    unknown = [n for n in settled_reachable if n not in dist and n in can_reach_unexplored]
     dead_set = set(dead)
 
     # A dead page's successors are all dead too, so each SCC is all-dead or none.
@@ -375,7 +384,7 @@ def analyze_mode(
         unexplored_reachable=sorted(n for n in reachable if n in unexplored),
     )
 
-    finite = {n: dist[n] for n in explored_reachable if n in dist}
+    finite = {n: dist[n] for n in settled_reachable if n in dist}
     max_clicks = max(finite.values()) if finite else None
     worst_case = WorstCase(
         max_clicks=max_clicks,
@@ -455,7 +464,7 @@ def analyze(
 # --------------------------------------------------------------------------- from a crawl
 
 
-def graph_from_store(store) -> tuple[nx.DiGraph, list[EntryPoint]]:
+def graph_from_store(store, win=None) -> tuple[nx.DiGraph, list[EntryPoint]]:
     """Build the graph and entry points from a crawl database (``pathcrawl.store.Store``).
 
     - Loaded pages (``ok``, ``http_error``) are explored nodes.
@@ -464,14 +473,24 @@ def graph_from_store(store) -> tuple[nx.DiGraph, list[EntryPoint]]:
     - Pages that redirected off the allowlist are left out, along with links to them.
     - Link targets are resolved through redirects, so a link to an old URL
       points at the page it actually lands on.
+    - With ``win`` (the config's ``WinConfig``), every node whose URL matches
+      the win patterns is a win, whatever happened when crawling it: loaded,
+      blocked by robots.txt, errored, or only ever seen as a link target. The
+      one exception is a page that loaded without the form when the config
+      says ``require_form: true``.
+    - Every node gets ``status``: its stored crawl status, or ``None`` for a
+      link target that was never fetched.
     """
     from pathcrawl.store import EXPLORED_STATUSES
 
-    pages, offsite = [], set()
+    pages, offsite, statuses, form_missing = [], set(), {}, set()
     for row in store.pages():
         if row["status"] == "offsite":
             offsite.add(row["url"])
             continue
+        statuses[row["url"]] = row["status"]
+        if row["status"] in EXPLORED_STATUSES and row["form_present"] == 0:
+            form_missing.add(row["url"])
         pages.append(
             Page(
                 url=row["url"],
@@ -490,4 +509,21 @@ def graph_from_store(store) -> tuple[nx.DiGraph, list[EntryPoint]]:
         region = row["region"] if not row["operator"] else BODY
         edges.append(Edge(row["src"], dst, region, operator=bool(row["operator"])))
     entries = [EntryPoint(r["label"], r["node_url"]) for r in store.entries()]
-    return build_graph(pages, edges), entries
+    g = build_graph(pages, edges)
+    for n in g:
+        g.nodes[n]["status"] = statuses.get(n)
+    if win is not None:
+        mark_pattern_wins(g, win, form_missing)
+    return g, entries
+
+
+def mark_pattern_wins(g: nx.DiGraph, win, form_missing: Iterable[str] = ()) -> None:
+    """Mark every node whose URL matches the win patterns as a win
+    (``win_source`` "pattern"), except loaded pages that lack a required form."""
+    form_missing = set(form_missing)
+    for n, d in g.nodes(data=True):
+        if d["win"] or not win.url_matches(n):
+            continue
+        if win.require_form and n in form_missing:
+            continue
+        d["win"], d["win_source"] = True, "pattern"

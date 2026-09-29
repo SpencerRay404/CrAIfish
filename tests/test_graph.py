@@ -49,8 +49,10 @@ def entry(result, mode, label):
 def test_fixture_graph_shape():
     g = fixture_graph()
     assert len(g) == 10
-    assert all(d["explored"] for _, d in g.nodes(data=True))
+    # every page is loaded except the win, which is the goal and never loaded
+    assert [n for n, d in g.nodes(data=True) if not d["explored"]] == [u("win")]
     assert [n for n, d in g.nodes(data=True) if d["win"]] == [u("win")]
+    assert g.out_degree(u("win")) == 0  # its links are not followed
     # the orphan has no outbound links; self-links were dropped
     assert g.out_degree(u("orphan")) == 0
     assert not g.has_edge(u("win"), u("win"))
@@ -146,8 +148,8 @@ def test_dead_zones_all_links(result):
     dz = result.modes[ALL_LINKS].dead_zones
     assert dz.dead_ends == [u("orphan")]
     assert dz.dead_end_count == 1
-    assert dz.crawled_pages == 10
-    assert dz.dead_end_pct == 10.0
+    assert dz.crawled_pages == 9
+    assert dz.dead_end_pct == 11.1
     assert dz.trap_loops == []
     assert dz.unknown == [] and dz.unexplored_reachable == []
 
@@ -156,7 +158,7 @@ def test_dead_zones_content_only(result):
     dz = result.modes[CONTENT_ONLY].dead_zones
     assert dz.dead_ends == [u("orphan"), u("trap-a"), u("trap-b"), u("trap-c")]
     assert dz.dead_end_count == 4
-    assert dz.dead_end_pct == 40.0
+    assert dz.dead_end_pct == 44.4
     assert dz.trap_loops == [[u("trap-a"), u("trap-b"), u("trap-c")]]
 
 
@@ -302,3 +304,16 @@ def test_longest_path_time_budget_gives_lower_bound():
 
 def test_analysis_is_deterministic():
     assert analyze(fixture_graph(), ENTRIES, 8).to_dict() == analyze(fixture_graph(), ENTRIES, 8).to_dict()
+
+
+def test_win_is_terminal_and_never_unexplored():
+    # w is a win that was never loaded; its outbound link must not count
+    g = build_graph(
+        [Page("a"), Page("w", explored=False, win=True), Page("after")],
+        [Edge("a", "w"), Edge("w", "after"), Edge("w", "x")],
+    )
+    res = analyze(g, [EntryPoint("a", "a")], max_depth=8).modes["content_only"]
+    assert res.entries[0].shortest_path == ["a", "w"]
+    assert res.dead_zones.unknown == []
+    assert res.dead_zones.unexplored_reachable == []  # x lies past the win
+    assert res.reachable_pages == 2

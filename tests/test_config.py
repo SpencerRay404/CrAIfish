@@ -263,3 +263,18 @@ def test_placeholders_only_block_the_campaign_being_crawled():
     c = parse_config(data)
     assert blocking_placeholders(c, "c1") == []
     assert len(blocking_placeholders(c, "todo")) == 2
+
+
+def test_near_miss_keywords_come_from_the_patterns():
+    ups = load_config(CONFIGS / "ups.yaml").win
+    assert ups.keywords() == ["virtual-consultation"]
+    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-discount-ussp-page.html")
+    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-2023-ussp-page.html")
+    assert not ups.near_miss("https://solutions.ups.com/virtual-consultation-us-en-v4.html")  # a real win
+    assert not ups.near_miss("https://solutions.ups.com/manufacturing-ussp-page.html")
+
+    c = parse_config(cfg(win={"url_patterns": ["https://www.acme.test/en/demo*", "re:https://x\\.test/.*"]}))
+    assert c.win.keywords() == ["demo"]
+    c = parse_config(cfg(win={"near_miss_keywords": ["Book-A-Call"]}))
+    assert c.win.keywords() == ["book-a-call"]
+    assert c.win.near_miss("https://www.acme.test/en/book-a-call-today")

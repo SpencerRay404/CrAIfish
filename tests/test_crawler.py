@@ -284,7 +284,9 @@ def test_page_data_is_captured(make_site, tmp_path):
         "/js.html": (200, {}, html(NAV + js_only)),
         "/win.html": WIN,
     })
-    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    cfg = config_for(site, ["/start.html"])
+    cfg.win.require_form = True  # the win is loaded only to check its form
+    c, _ = crawl(cfg, tmp_path)
     start = page_row(c, site.base + "/start.html")
     assert start["meta_description"] == "A test page"
     assert start["canonical"] == site.base + "/start.html"
@@ -299,18 +301,76 @@ def test_page_data_is_captured(make_site, tmp_path):
     assert win["win"] == 1 and win["win_source"] == "pattern" and win["form_present"] == 1
 
 
-def test_forms_are_never_submitted_and_crawl_continues_past_win(make_site, tmp_path):
+WIN_WITH_NEXT_PAGE = (200, {}, html(
+    '<form id="lead" action="/submitted" method="post"><button>Send</button></form>'
+    '<a href="/thanks.html">After</a>'
+))
+
+
+def test_win_is_terminal_and_not_loaded(make_site, tmp_path):
     site = make_site({
         "/start.html": (200, {}, html(NAV)),
-        "/win.html": (200, {}, html(
-            '<form id="lead" action="/submitted" method="post"><button>Send</button></form>'
-            '<a href="/thanks.html">After</a>'
-        )),
+        "/win.html": WIN_WITH_NEXT_PAGE,
         "/thanks.html": (200, {}, html(NAV)),
     })
     c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
-    assert "/submitted" not in site.requests
-    assert c.store.has_page(site.base + "/thanks.html")  # crawled past the win page
+    assert "/win.html" not in site.requests  # matched by URL: nothing to load
+    win = page_row(c, site.base + "/win.html")
+    assert win["status"] == "not_fetched" and win["win"] == 1 and win["win_source"] == "pattern"
+    assert not c.store.has_page(site.base + "/thanks.html")
+    assert c.store.explored_count() == 1
+
+
+def test_forms_are_never_submitted_and_win_links_not_followed(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html(NAV)),
+        "/win.html": WIN_WITH_NEXT_PAGE,
+        "/thanks.html": (200, {}, html(NAV)),
+    })
+    cfg = config_for(site, ["/start.html"])
+    cfg.win.require_form = True  # loaded to check the form, still terminal
+    c, _ = crawl(cfg, tmp_path)
+    assert "/win.html" in site.requests and "/submitted" not in site.requests
+    assert page_row(c, site.base + "/win.html")["form_present"] == 1
+    assert not c.store.has_page(site.base + "/thanks.html")
+    assert "/thanks.html" not in site.requests
+
+
+def test_robots_blocked_win_still_counts(make_site, tmp_path):
+    """Regression: a win URL forbidden by robots.txt used to be saved as a
+    non-win, so every journey reported "no path to the win"."""
+    from pathcrawl.report import write_report
+    from pathcrawl.run import open_run
+    import yaml
+
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: *\nDisallow: /win.html\n"),
+        "/start.html": (200, {}, html('<main><a href="/win.html">Talk to an expert</a></main>')),
+        "/win.html": WIN,
+    })
+    cfg = config_for(site, ["/start.html"])
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump()))
+    c, _ = crawl(cfg, tmp_path)
+    assert "/win.html" not in site.requests
+    assert page_row(c, site.base + "/win.html")["status"] == "robots"
+    c.store.close()
+
+    run = open_run(tmp_path)
+    win_url = site.base + "/win.html"
+    assert run.graph.nodes[win_url]["win"] is True
+    for mode in ("all_links", "content_only"):
+        res = run.analyze().modes[mode]
+        assert res.entries[0].shortest_clicks == 1
+        assert res.entries[0].shortest_path == [site.base + "/start.html", win_url]
+        assert res.dead_zones.unknown == [] and res.dead_zones.unexplored_reachable == []
+    write_report(run)
+    report = (tmp_path / "report.md").read_text()
+    assert "win page not fetched: blocked by robots.txt" in report
+    import json
+    data = json.loads((tmp_path / "report.json").read_text())
+    assert data["win_pages"][0]["fetched"] is False
+    assert data["win_pages"][0]["not_fetched_reason"] == "blocked by robots.txt"
+    run.close()
 
 
 def test_consent_banner_is_dismissed(make_site, tmp_path):
@@ -356,7 +416,7 @@ def test_closing_the_browser_saves_and_resumes(make_site, tmp_path):
 
     c2, status = crawl(cfg, tmp_path)
     assert status == "complete"
-    assert c2.store.explored_count() == 3
+    assert c2.store.explored_count() == 2  # the win is recorded, not loaded
 
 
 def test_file_download_instead_of_page_is_named_and_recorded(make_site, tmp_path):

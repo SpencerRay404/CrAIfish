@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE TABLE IF NOT EXISTS pages (
     url TEXT PRIMARY KEY,
     requested_url TEXT,
-    status TEXT NOT NULL,             -- ok, http_error, skipped, robots, offsite
+    status TEXT NOT NULL,             -- ok, http_error, skipped, robots, offsite, not_fetched
     depth INTEGER,
     http_status INTEGER,
     load_ms INTEGER,
