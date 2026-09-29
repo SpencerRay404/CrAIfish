@@ -49,6 +49,11 @@ RETRY, SKIP, GOTO_URL, MARK_WIN, QUIT = "retry", "skip", "url", "win", "quit"
 # Page status for a win URL the crawler recorded without loading it.
 NOT_FETCHED = "not_fetched"
 
+# A long crawl opens a fresh tab this often, so the browser's memory doesn't grow all night.
+FRESH_TAB_EVERY = 250
+# Unexpected errors on this many pages in a row stop the crawl (something is badly wrong).
+MAX_CONSECUTIVE_ERRORS = 20
+
 
 @dataclass
 class Problem:
@@ -288,6 +293,7 @@ class Crawler:
             self.store.set_meta(user_agent=self.user_agent, headless=not self.headed)
             self.robots = RobotsCache(context.request, cc.respect_robots)
             self.request = context.request
+            processed, consecutive_errors = 0, 0
             try:
                 while True:
                     if self.store.explored_count() >= cc.max_pages:
@@ -297,7 +303,25 @@ class Crawler:
                     item = self.store.next_pending()
                     if item is None:
                         break
-                    self._process(item.url, item.depth)
+                    try:
+                        self._process(item.url, item.depth)
+                        consecutive_errors = 0
+                    except (OperatorQuit, BrowserClosed, KeyboardInterrupt):
+                        raise
+                    except Exception as e:
+                        if _is_browser_closed(e):
+                            raise
+                        # One bad page must not end a long unattended crawl: record it and move on.
+                        consecutive_errors += 1
+                        detail = f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}"
+                        self._save_failed(item.url, item.depth, "skipped", f"crawler error: {detail}")
+                        self._log(item.depth, "error", item.url, f"skipped after an unexpected error: {detail}")
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            raise
+                        self._reset_tab()
+                    processed += 1
+                    if processed % FRESH_TAB_EVERY == 0:
+                        self._reset_tab()
                     if cc.delay_ms and self.store.pending_count():
                         time.sleep(cc.delay_ms / 1000)
             except OperatorQuit:
@@ -307,9 +331,10 @@ class Crawler:
                 status = "quit"
                 self._resume_hint("Interrupted; progress saved.")
             except Exception as e:
+                status = "quit"  # never leave a crashed run marked complete
                 if not _is_browser_closed(e):
+                    self._resume_hint("The crawl stopped on an error; progress saved.")
                     raise
-                status = "quit"
                 self._resume_hint("The browser window was closed; progress saved.")
             finally:
                 self.store.set_meta(status=status, finished_at=datetime.now(UTC).isoformat(timespec="seconds"))

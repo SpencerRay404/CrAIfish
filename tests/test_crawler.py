@@ -261,6 +261,51 @@ def test_page_budget_stops_the_crawl(make_site, tmp_path):
     assert c.store.explored_count() == 3
 
 
+def test_budget_stop_resumes_with_a_higher_budget(make_site, tmp_path):
+    chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
+    site = make_site(chain)
+    c, status = crawl(config_for(site, ["/p0.html"], max_pages=3), tmp_path)
+    assert status == "budget"
+    c.store.close()
+    c, status = crawl(config_for(site, ["/p0.html"], max_pages=6), tmp_path)  # same run directory
+    assert status == "budget" and c.store.explored_count() == 6
+    assert site.requests.count("/p0.html") == 2  # page load + raw fetch in the first run only
+
+
+def test_an_unexpected_page_error_is_recorded_and_the_crawl_goes_on(make_site, tmp_path, monkeypatch):
+    site = make_site({
+        "/start.html": (200, {}, html('<a href="/bad.html">bad</a><a href="/ok.html">ok</a>')),
+        "/bad.html": (200, {}, html("<p>bad</p>")),
+        "/ok.html": (200, {}, html("<p>ok</p>")),
+    })
+    real = Crawler._process
+
+    def flaky(self, url, depth):
+        if url.endswith("/bad.html"):
+            raise RuntimeError("something odd\nsecond line")
+        return real(self, url, depth)
+
+    monkeypatch.setattr(Crawler, "_process", flaky)
+    c, status = crawl(config_for(site, ["/start.html"]), tmp_path)
+    assert status == "complete"
+    bad = page_row(c, site.base + "/bad.html")
+    assert bad["status"] == "skipped" and bad["error"] == "crawler error: RuntimeError: something odd"
+    assert page_row(c, site.base + "/ok.html")["status"] == "ok"
+
+
+def test_a_crash_is_recorded_as_paused_not_complete(make_site, tmp_path, monkeypatch):
+    import pathcrawl.crawler as crawler_mod
+
+    site = make_site({"/start.html": (200, {}, html("<p>x</p>"))})
+    monkeypatch.setattr(crawler_mod, "MAX_CONSECUTIVE_ERRORS", 1)
+    monkeypatch.setattr(Crawler, "_process", lambda self, url, depth: (_ for _ in ()).throw(RuntimeError("boom")))
+    c = Crawler(config_for(site, ["/start.html"]), config_for(site, ["/start.html"]).campaigns[0], tmp_path,
+                NonInteractiveOperator(), headed=False)
+    with pytest.raises(RuntimeError):
+        c.run()
+    assert c.store.meta("status") == "quit"
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)
