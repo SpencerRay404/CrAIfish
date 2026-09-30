@@ -86,7 +86,7 @@ campaigns:
 
 crawl:
   max_depth: 8
-  max_pages: 5000  # the whole site; resume an older run with --max-pages 5000
+  max_pages: 5000   # pages per run; raise with --max-pages for a bigger map
   delay_ms: 1500
   headed: true
   slow_mo_ms: 400
