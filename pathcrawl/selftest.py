@@ -8,11 +8,22 @@ runs in pytest and CI.
 Stages:
 - ``graph``: read the fixture HTML files directly, extract links, build the
   graph and run every metric. No browser needed.
+- ``crawl``: serve the fixture site on localhost, crawl it with the real
+  browser crawler, rebuild the graph from the crawl database, and check the
+  same numbers. This is the end-to-end gate.
+- ``report``: write every report file for that crawl, read them back, and
+  check that the report's numbers and each page's category are right.
 """
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import tempfile
+import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -66,12 +77,15 @@ def load_expected(site: Path = FIXTURE_SITE) -> dict[str, Any]:
 def graph_from_html_files(cfg: Config, site: Path = FIXTURE_SITE, base: str = FIXTURE_BASE) -> nx.DiGraph:
     """Build the graph straight from the fixture's HTML files, the way the
     crawler will from rendered pages: extract links, keep in-scope ones,
-    mark wins by URL pattern."""
+    mark wins by URL pattern. Like the crawler, a win page is recorded but not
+    loaded (it is the goal), so it is unexplored and its links are ignored."""
     pages, edges = [], []
     for f in sorted(site.glob("*.html")):
         url = cfg.scope.normalize(base + f.name)
         win = cfg.win.url_matches(url)
-        pages.append(Page(url=url, win=win, win_source="pattern" if win else None))
+        pages.append(Page(url=url, explored=not win, win=win, win_source="pattern" if win else None))
+        if win:
+            continue
         for link in extract_links(
             f.read_text(), url, cfg.scope.strip_query_params, cfg.scope.region_selectors.model_dump()
         ):
@@ -146,3 +160,110 @@ def run_graph_stage(site: Path = FIXTURE_SITE) -> list[Check]:
     analysis = analyze(g, entry_points(cfg), max_depth=expected["max_depth"])
     crawled = sum(1 for _, d in g.nodes(data=True) if d["explored"])
     return compare(analysis, expected, FIXTURE_BASE, "graph", crawled)
+
+
+# --------------------------------------------------------------------------- crawl stage
+
+
+class _QuietHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002 - signature fixed by the base class
+        pass
+
+
+@contextlib.contextmanager
+def serve_directory(directory: Path) -> Iterator[str]:
+    """Serve ``directory`` on a free localhost port; yields the base URL."""
+    handler = functools.partial(_QuietHandler, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def run_crawl_and_report_stages(site: Path = FIXTURE_SITE, headed: bool = False, console=None,
+                                with_report: bool = True) -> list[Check]:
+    """Stages 'crawl' and 'report' on one crawl (the report stage reads that crawl's files)."""
+    with tempfile.TemporaryDirectory(prefix="pathcrawl-selftest-") as tmp:
+        checks, base = _crawl(site, headed, Path(tmp), console)
+        if with_report:
+            checks += run_report_stage(Path(tmp), base, site)
+        return checks
+
+
+def run_report_stage(run_dir: Path, base: str, site: Path = FIXTURE_SITE) -> list[Check]:
+    """Stage 'report': write the report files for a fixture crawl and check them."""
+    import csv
+    import json
+
+    from pathcrawl.report import write_report
+    from pathcrawl.run import open_run
+
+    expected = load_expected(site)
+    run = open_run(run_dir)
+    paths = write_report(run)
+    run.close()
+    checks = [Check("report", "-", f"{name} written", True, p.exists() and p.stat().st_size > 0) for name, p in paths.items()]
+
+    data = json.loads(paths["report.json"].read_text())
+    for mode in MODES:
+        exp, got = expected["modes"][mode], data["analysis"]["modes"][mode]
+        by_label = {e["label"]: e for e in got["entries"]}
+        for label in expected["entries"]:
+            want = len(exp["shortest_path"][label]) - 1
+            checks.append(Check("report", mode, f"report.json shortest clicks ({label})", want, by_label[label]["shortest_clicks"]))
+        checks.append(Check("report", mode, "report.json dead ends", len(exp["dead_ends"]), got["dead_zones"]["dead_end_count"]))
+        checks.append(Check("report", mode, "report.json trap loops", len(exp["trap_loops"]), len(got["dead_zones"]["trap_loops"])))
+
+    with open(paths["categories.csv"], newline="") as f:
+        rows = {_stem(r["url"], base): r["reach_content_only"] for r in csv.DictReader(f)}
+    for stem, want in expected["categories_content_only"].items():
+        checks.append(Check("report", "content_only", f"category of {stem}", want, rows.get(stem)))
+    mmd = paths["paths.mmd"].read_text()
+    checks.append(Check("report", "-", "paths.mmd marks the win and a dead zone",
+                        True, "class " in mmd and " win" in mmd and " dead" in mmd))
+    checks.append(Check("report", "-", "report.md says the win was matched by URL but not loaded",
+                        True, "win page not fetched: the crawl stops at the win" in paths["report.md"].read_text()))
+    gexf = nx.read_gexf(paths["graph.gexf"])
+    checks.append(Check("report", "-", "graph.gexf has a position, size and colour for every page",
+                        True, len(gexf) > 0 and all({"position", "size", "color"} <= set(d.get("viz", {}))
+                                                     for _, d in gexf.nodes(data=True))))
+    return checks
+
+
+def run_crawl_stage(site: Path = FIXTURE_SITE, headed: bool = False, run_dir: Path | None = None, console=None) -> list[Check]:
+    """Stage 'crawl': the real crawler against the served fixture site."""
+    with contextlib.ExitStack() as stack:
+        if run_dir is None:
+            run_dir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="pathcrawl-selftest-")))
+        return _crawl(site, headed, run_dir, console)[0]
+
+
+def _crawl(site: Path, headed: bool, run_dir: Path, console) -> tuple[list[Check], str]:
+    """Crawl the served fixture site into ``run_dir``; returns the checks and the base URL."""
+    from rich.console import Console
+
+    from pathcrawl.crawler import Crawler, NonInteractiveOperator
+    from pathcrawl.graph import graph_from_store
+
+    import yaml as _yaml
+
+    expected = load_expected(site)
+    with serve_directory(site) as base:
+        cfg = fixture_config(base, expected["entries"])
+        (run_dir / "config.yaml").write_text(_yaml.safe_dump(cfg.model_dump()))
+        cfg.crawl.delay_ms = 0
+        cfg.crawl.slow_mo_ms = 250 if headed else 0
+        crawler = Crawler(
+            cfg, cfg.campaigns[0], run_dir, NonInteractiveOperator(),
+            console=console or Console(quiet=True), headed=headed,
+        )
+        crawler.run()
+        g, entries = graph_from_store(crawler.store, cfg.win)
+        crawled = crawler.store.explored_count()
+        crawler.store.close()
+        analysis = analyze(g, entries, max_depth=expected["max_depth"])
+        return compare(analysis, expected, base, "crawl", crawled), base

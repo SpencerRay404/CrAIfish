@@ -1,0 +1,48 @@
+# Live demo against quotes.toscrape.com, a public site built for scraping practice
+# (no robots.txt restrictions). Use it to watch a real crawl end to end:
+#
+#   pathcrawl crawl   --config configs/demo.yaml --campaign demo-quotes
+#   pathcrawl analyze --run runs/demo/demo-quotes/<timestamp>
+#
+# The "win" is the site's login page (it has a real form; the crawler never
+# submits it). The only link to it is in the site-wide header, so expect:
+# all links -> 1 click from anywhere; content links only -> no path at all.
+# That gap is exactly what the two modes exist to expose.
+
+client:
+  name: "Demo (quotes.toscrape.com)"
+  slug: "demo"
+
+scope:
+  allowed_domains: ["quotes.toscrape.com"]
+  strip_query_params: ["utm_*"]
+  region_selectors:
+    header: [".header-box"]   # the site header is a plain <div>, so tell the crawler
+
+win:
+  name: "Login form"
+  url_patterns: ["https://quotes.toscrape.com/login"]
+  form_selector: "form"
+
+campaigns:
+  - id: "demo-quotes"
+    name: "Demo campaign: quotes about love and Einstein"
+    platform: "demo"
+    ad_copy: |
+      Find the words that move you. Browse quotes about love, or read about
+      Albert Einstein and the ideas behind his most famous lines.
+    entry_links:
+      - label: "quotes about love"
+        url: "https://quotes.toscrape.com/tag/love/?utm_source=demo"
+      - label: "Albert Einstein"
+        url: "https://quotes.toscrape.com/author/Albert-Einstein"
+
+crawl:
+  max_depth: 3
+  max_pages: 40
+  delay_ms: 500
+  headed: true
+  slow_mo_ms: 300
+  respect_robots: true
+  page_timeout_ms: 30000
+  screenshot: true

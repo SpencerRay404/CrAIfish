@@ -1,5 +1,18 @@
-# UPS client config. PLACEHOLDER VALUES ONLY: replace every REPLACE-ME before crawling.
-# `pathcrawl validate --config configs/ups.yaml` warns about any that remain.
+# UPS client config.
+#
+# Campaign "site-map-us-en" maps and categorizes the US-English site from the
+# home page and the manufacturing solutions page (no ad involved):
+#   pathcrawl crawl  --config configs/ups.yaml --campaign site-map-us-en --headless
+#   pathcrawl report --run runs/ups/site-map-us-en/<timestamp>
+#
+# Campaign "linkedin-articles" starts from the UPS pages that five LinkedIn
+# thought-leadership articles send people to (the articles themselves are
+# listed under ad_urls and never crawled):
+#   pathcrawl crawl  --config configs/ups.yaml --campaign linkedin-articles
+#   pathcrawl report --run runs/ups/linkedin-articles/<timestamp>
+#
+# www.ups.com answered a headless browser with a file download instead of the
+# home page, so run UPS crawls with the visible browser (the default).
 
 client:
   name: "UPS"
@@ -9,36 +22,71 @@ scope:
   allowed_domains:
     - "www.ups.com"
     - "about.ups.com"
+    - "solutions.ups.com"
   locale_include: ["/us/en/"]
+  # Only these hosts put the locale in the path; solutions.ups.com pages
+  # (including the win) look like /virtual-consultation-us-en-v4.html.
+  locale_hosts: ["www.ups.com", "about.ups.com"]
   locale_exclude: []
-  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk"]
+  # WT.mc_id is UPS's campaign tracking code; stripping it makes every
+  # "Talk With an Expert" link point at the same consultation page.
+  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk", "WT.*"]
   region_selectors:
     nav: []
     header: []
     footer: []
 
 win:
-  name: "VC form"
+  name: "virtual consultation form"
+  # The "Talk With an Expert" button on solutions pages links here (the v4
+  # suffix may change, hence the wildcard).
   url_patterns:
-    - "https://www.ups.com/us/en/REPLACE-ME/*"
-  form_selector: "form#REPLACE-ME"
+    - "https://solutions.ups.com/virtual-consultation-us-en*"
   require_form: false
 
 campaigns:
-  - id: "tl-2026-q3-01"
-    name: "Thought leadership ad 1"
+  - id: "site-map-us-en"
+    name: "US-English site map"
+    platform: "site-map"
+    ad_copy: |
+      No ad: a site-map run that starts from the US home page and the
+      manufacturing solutions page and follows every in-scope link.
+    entry_links:
+      - label: "US home page"
+        url: "https://www.ups.com/us/en/home"
+      - label: "Manufacturing solutions page"
+        url: "https://solutions.ups.com/manufacturing-ussp-page.html"
+
+  - id: "linkedin-articles"
+    name: "LinkedIn thought-leadership articles (5) and the UPS pages they send people to"
     platform: "linkedin"
     ad_copy: |
-      REPLACE-ME: paste the full ad paragraph here.
+      Five LinkedIn thought-leadership articles: integrated supply chain risk
+      management for manufacturing; reducing retail return fraud without adding
+      friction; luxury goods logistics; micro-fulfillment centers in retail;
+      new UPS tools for small business shippers. Their UPS landing pages are
+      the entry links below.
+    ad_urls:
+      - "https://www.linkedin.com/pulse/how-integrated-supply-chain-risk-management-helps-protect-manufacturing-dctnc/"
+      - "https://www.linkedin.com/pulse/reducing-retail-return-fraud-without-adding-friction-ups-edmzc/"
+      - "https://www.linkedin.com/pulse/how-luxury-goods-logistics-delivers-tailored-shipping-experiences-d8lxc/"
+      - "https://www.linkedin.com/pulse/from-store-door-how-micro-fulfillment-centers-transforming-retail-roftc/"
+      - "https://www.linkedin.com/pulse/ups-experts-break-down-new-tools-small-business-shippers-ups-8lunc/"
     entry_links:
-      - label: "REPLACE-ME link 1"
-        url: "https://www.ups.com/us/en/REPLACE-ME-1"
-      - label: "REPLACE-ME link 2"
-        url: "https://www.ups.com/us/en/REPLACE-ME-2"
+      - label: "RFID network story (about.ups.com)"
+        url: "https://about.ups.com/us/en/our-stories/customer-first/lighting-up-our-u-s--network-end-to-end-with-rfid.html"
+      - label: "Logistics solutions"
+        url: "https://www.ups.com/us/en/supplychain/logistics-solutions"
+      - label: "Inventory optimization (manufacturing)"
+        url: "https://www.ups.com/us/en/customized-shipping-logistic-services/manufacturing-logistics-services/business-benefits-of-inventory-optimization"
+      - label: "Omnichannel customer loyalty (retail)"
+        url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/win-customer-loyalty-with-omnichannel-retail-strategies"
+      - label: "Mastering omnichannel strategy (retail)"
+        url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/mastering-your-omnichannel-strategy-for-retail-growth"
 
 crawl:
   max_depth: 8
-  max_pages: 300
+  max_pages: 5000   # pages per run; raise with --max-pages for a bigger map
   delay_ms: 1500
   headed: true
   slow_mo_ms: 400

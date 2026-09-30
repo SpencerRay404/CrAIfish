@@ -15,6 +15,7 @@ import re
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import soupsieve
 import yaml
@@ -70,6 +71,10 @@ class ScopeConfig(_Strict):
     allowed_domains: list[str] = Field(min_length=1)
     locale_include: list[str] = []
     locale_exclude: list[str] = []
+    # Hosts the locale filters apply to. Empty = every allowed domain. Use it
+    # when only some hosts put the locale in the path (e.g. www.ups.com/us/en/
+    # but solutions.ups.com/some-page.html).
+    locale_hosts: list[str] = []
     strip_query_params: list[str] = []
     region_selectors: RegionSelectors = RegionSelectors()
 
@@ -93,7 +98,17 @@ class ScopeConfig(_Strict):
     def domain_allowed(self, url: str) -> bool:
         return host_allowed(url, self.allowed_domains)
 
+    @model_validator(mode="after")
+    def _locale_hosts_are_allowed(self) -> ScopeConfig:
+        self.locale_hosts = [h.strip().lower().rstrip(".") for h in self.locale_hosts]
+        unknown = [h for h in self.locale_hosts if h not in self.allowed_domains]
+        if unknown:
+            raise ValueError(f"locale_hosts {unknown} must also be in allowed_domains")
+        return self
+
     def locale_allowed(self, url: str) -> bool:
+        if self.locale_hosts and host_of(url) not in self.locale_hosts:
+            return True
         return locale_allowed(url, self.locale_include, self.locale_exclude)
 
     def in_scope(self, url: str) -> bool:
@@ -108,6 +123,10 @@ class WinConfig(_Strict):
     # When false (the default), a page matching url_patterns is a win even if
     # form_selector is not found; the report flags it as "form not rendered".
     require_form: bool = False
+    # Words that make a URL "look like" the win. The report warns about pages
+    # containing one that match no url_pattern (a variant the patterns miss).
+    # Left empty, they are derived from the patterns (see keywords()).
+    near_miss_keywords: list[str] = []
 
     @field_validator("url_patterns")
     @classmethod
@@ -143,6 +162,35 @@ class WinConfig(_Strict):
                 return True
         return False
 
+    def keywords(self) -> list[str]:
+        """Lowercase words that make a URL look like the win.
+
+        ``near_miss_keywords`` if set; otherwise, for each glob pattern, the
+        first two words of its last path segment before any wildcard, e.g.
+        ``virtual-consultation`` from ``.../virtual-consultation-us-en*``
+        (one word if that is all there is). Regex patterns contribute nothing.
+        """
+        if self.near_miss_keywords:
+            return sorted({k.lower() for k in self.near_miss_keywords if k.strip()})
+        out = set()
+        for p in self.url_patterns:
+            if p.startswith(REGEX_PREFIX):
+                continue
+            segment = re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/").rsplit("/", 1)[-1].lower()
+            segment = re.sub(r"\.[a-z0-9]+$", "", segment)
+            words = list(re.finditer(r"[a-z0-9]{3,}", segment))
+            if words:
+                out.add(segment[words[0].start():words[min(1, len(words) - 1)].end()])
+        return sorted(out)
+
+    def near_miss(self, url: str) -> bool:
+        """True if ``url`` looks like the win (a keyword in its path) but
+        matches no url_pattern."""
+        if self.url_matches(url):
+            return False
+        path = urlsplit(url).path.lower()
+        return any(k in path for k in self.keywords())
+
 
 class EntryLink(_Strict):
     label: str = Field(min_length=1)
@@ -154,6 +202,9 @@ class CampaignConfig(_Strict):
     name: str = Field(min_length=1)
     platform: str = Field(min_length=1)
     ad_copy: str = Field(min_length=1)
+    # Where the ad itself lives (e.g. LinkedIn posts). Recorded in the report,
+    # never crawled: the crawl starts at entry_links.
+    ad_urls: list[str] = []
     entry_links: list[EntryLink] = Field(min_length=1)
 
 
@@ -256,6 +307,17 @@ def _placeholder_paths(value: object, path: str = "") -> list[str]:
     if isinstance(value, list):
         return [p for i, v in enumerate(value) for p in _placeholder_paths(v, f"{path}[{i}]")]
     return []
+
+
+def blocking_placeholders(config: Config, campaign_id: str) -> list[str]:
+    """Placeholders that would break a crawl of this campaign (the win and the
+    campaign itself). Placeholders in other campaigns don't block it."""
+    idx = next(i for i, c in enumerate(config.campaigns) if c.id == campaign_id)
+    return [
+        f"{p} still contains the placeholder {PLACEHOLDER!r}"
+        for p in _placeholder_paths(config.model_dump())
+        if p.startswith("win.") or p.startswith(f"campaigns[{idx}]")
+    ]
 
 
 def config_warnings(config: Config) -> list[str]:

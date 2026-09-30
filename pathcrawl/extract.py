@@ -8,6 +8,7 @@ exactly the region logic the crawler uses.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import urljoin
@@ -113,3 +114,115 @@ def extract_links(
             )
         )
     return links
+
+
+# --------------------------------------------------------------------------- page data
+
+_INVISIBLE = ("script", "style", "noscript", "template", "svg")
+
+
+def visible_text(html: str) -> str:
+    """Human-readable text of a document, whitespace-collapsed.
+
+    Used for both the raw HTTP response and the rendered DOM, so the two
+    lengths are directly comparable for the render-dependency check.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(_INVISIBLE):
+        tag.decompose()
+    root = soup.body or soup
+    return " ".join(root.get_text(" ").split())
+
+
+def _jsonld_types(value: object) -> list[str]:
+    types: list[str] = []
+    if isinstance(value, dict):
+        t = value.get("@type")
+        if isinstance(t, str):
+            types.append(t)
+        elif isinstance(t, list):
+            types.extend(str(x) for x in t)
+        for v in value.values():
+            if isinstance(v, (dict, list)):
+                types.extend(_jsonld_types(v))
+    elif isinstance(value, list):
+        for v in value:
+            types.extend(_jsonld_types(v))
+    return types
+
+
+@dataclass
+class PageData:
+    title: str | None
+    meta_description: str | None
+    headings: list[tuple[int, str]]
+    canonical: str | None
+    jsonld_types: list[str]  # empty = no structured data found
+    form_present: bool | None  # None when no form_selector is configured
+    text: str
+
+
+def extract_page(html: str, page_url: str, form_selector: str | None = None) -> PageData:
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = " ".join(soup.title.get_text().split()) if soup.title else None
+    meta = soup.find("meta", attrs={"name": lambda v: v and v.lower() == "description"})
+    description = " ".join(str(meta.get("content", "")).split()) if meta else None
+
+    headings = [
+        (int(h.name[1]), " ".join(h.get_text(" ", strip=True).split()))
+        for h in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+    ]
+
+    canonical = None
+    for link in soup.find_all("link", href=True):
+        rel = link.get("rel") or []
+        if "canonical" in [r.lower() for r in (rel if isinstance(rel, list) else [rel])]:
+            canonical = normalize_url(str(link["href"]), base=page_url)
+            break
+
+    types: list[str] = []
+    for script in soup.find_all("script", attrs={"type": lambda v: v and v.lower() == "application/ld+json"}):
+        try:
+            types.extend(_jsonld_types(json.loads(script.string or "")))
+        except ValueError:
+            types.append("(invalid JSON-LD)")
+
+    form_present = bool(soup.select_one(form_selector)) if form_selector else None
+
+    return PageData(
+        title=title,
+        meta_description=description,
+        headings=headings,
+        canonical=canonical,
+        jsonld_types=sorted(set(types)),
+        form_present=form_present,
+        text=visible_text(html),
+    )
+
+
+# A few phrases that bot walls and CAPTCHA interstitials reliably show.
+_BLOCK_PHRASES = (
+    "captcha",
+    "are you a robot",
+    "are you human",
+    "verify you are human",
+    "unusual traffic",
+    "access denied",
+    "request blocked",
+    "just a moment",  # Cloudflare interstitial title
+    "attention required",
+    "pardon our interruption",
+)
+
+
+def detect_block(http_status: int | None, title: str | None, text: str) -> str | None:
+    """Why this response looks like a block or bot wall, or None if it doesn't."""
+    if http_status in (403, 429):
+        return f"HTTP {http_status}"
+    haystack = f"{title or ''} {text[:2000]}".lower()
+    for phrase in _BLOCK_PHRASES:
+        # Short pages only: a long article that merely mentions "captcha" is not a wall.
+        if phrase in haystack and len(text) < 3000:
+            return f"page says {phrase!r}"
+    return None

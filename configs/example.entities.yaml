@@ -1,0 +1,60 @@
+# Entity taxonomy for a client: what pages can be about. Used by
+#   pathcrawl entities extract --run <run dir>      (also runs after each crawl
+#   pathcrawl report --run <run dir>                 and before each report)
+# Name the file configs/<client slug>.entities.yaml and it is found
+# automatically; edit it and re-run `pathcrawl report` to see the effect
+# (no re-crawl needed). Check it with: pathcrawl entities check --taxonomy <file>
+
+# The entity types. These five are the default.
+types: [Industry, Segment, Service, Topic, Customer]
+
+# Text repeated across the site (menus, cookie banners, "related stories"
+# modules) is removed before matching, so it can't tag every page.
+boilerplate:
+  window_words: 8         # a run of this many words...
+  window_min_pages: 30    # ...found on this many pages or more is dropped
+  heading_min_pages: 5    # a heading on this many pages or more is dropped
+
+# score = title_weight * title hits + heading_weight * heading hits
+#         + body_weight * min(body hits, body_cap); tagged when >= min_score
+scoring:
+  title_weight: 3
+  heading_weight: 2
+  body_weight: 1
+  body_cap: 5
+  min_score: 1
+
+coverage:
+  flag_min_pages: 10      # flag entities with this many pages and no content path to the win
+  bridges_per_page: 3     # bridge-link suggestions kept per page in bridge_links.csv
+
+# Optional local model for `pathcrawl entities propose` (OpenAI-compatible
+# endpoint: Ollama, LM Studio, llama.cpp server, vLLM).
+llm:
+  base_url: "http://localhost:11434/v1"
+  model: "hermes3"
+  max_chars: 6000
+  timeout_s: 180
+
+# Terms are case-insensitive whole words or phrases. A trailing * matches any
+# ending ("manufactur*" matches manufacturer, manufacturing). "re:" starts a
+# regex. Keep this section last: `pathcrawl entities accept` appends to it.
+entities:
+  - type: Industry
+    name: Manufacturing
+    terms: ["manufactur*", "factory", "factories"]
+  - type: Industry
+    name: Retail
+    terms: ["retail", "retailer*", "e-commerce", "ecommerce"]
+  - type: Segment
+    name: Small business
+    terms: ["small business*", "SMB", "SMBs"]
+  - type: Service
+    name: Freight
+    terms: ["freight", "LTL", "less-than-truckload"]
+  - type: Topic
+    name: Inventory
+    terms: ["inventory"]
+  - type: Customer
+    name: Acme Corp
+    terms: ["Acme Corp", "Acme Corporation"]

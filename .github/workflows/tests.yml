@@ -8,19 +8,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Browser tests must run here, never silently skip.
+      PATHCRAWL_REQUIRE_BROWSER: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
       - name: Install
-        run: pip install -e ".[dev]"
-      - name: Unit tests
+        run: |
+          pip install -e ".[dev]"
+          playwright install --with-deps chromium
+      - name: Unit and browser tests
         run: pytest -v
-      - name: Selftest gate (fixture site, expected vs actual)
+      - name: Selftest gate (fixture site, expected vs actual, graph + real crawl)
         run: pathcrawl selftest
       - name: Shipped configs validate
         run: |
           pathcrawl validate --config configs/example.yaml
           pathcrawl validate --config configs/ups.yaml
+          pathcrawl validate --config configs/demo.yaml
+          for t in configs/*.entities.yaml; do pathcrawl entities check --taxonomy "$t"; done

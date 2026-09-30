@@ -56,14 +56,32 @@ def test_valid_config_parses_with_crawl_defaults():
 
 
 def test_shipped_configs_are_valid():
-    for name in ("example.yaml", "ups.yaml"):
+    for name in ("example.yaml", "ups.yaml", "demo.yaml"):
         load_config(CONFIGS / name)
 
 
-def test_ups_config_warns_about_placeholders():
-    warnings = config_warnings(load_config(CONFIGS / "ups.yaml"))
-    assert any("win.url_patterns[0]" in w and "REPLACE-ME" in w for w in warnings)
-    assert any("campaigns[0].entry_links[0].url" in w for w in warnings)
+def test_ups_config():
+    from pathcrawl.config import blocking_placeholders
+
+    c = load_config(CONFIGS / "ups.yaml")
+    # both campaigns are ready to crawl
+    assert blocking_placeholders(c, "site-map-us-en") == []
+    assert blocking_placeholders(c, "linkedin-articles") == []
+    articles = c.campaign("linkedin-articles")
+    assert len(articles.entry_links) == 5 and len(articles.ad_urls) == 5
+    # the ads live on LinkedIn, which is never in scope; every entry link is
+    assert not any(c.scope.in_scope(u) for u in articles.ad_urls)
+    assert all(c.scope.in_scope(c.scope.normalize(e.url)) for e in articles.entry_links)
+    # /us/en/ applies to www.ups.com but not solutions.ups.com, where the win lives
+    assert c.scope.in_scope("https://www.ups.com/us/en/shipping.page")
+    assert not c.scope.in_scope("https://www.ups.com/gb/en/shipping.page")
+    assert c.scope.in_scope("https://solutions.ups.com/manufacturing-ussp-page.html")
+    # both "Talk With an Expert" tracking variants land on the same win page
+    for code in ("InvMgmt_0625_MktgVirtualConsultationMainPage_109541", "WHConnections_0625_MktgVirtualConsultationMainPage_109543"):
+        url = c.scope.normalize(f"https://solutions.ups.com/virtual-consultation-us-en-v4.html?WT.mc_id=ONLINE_CONTENT_{code}")
+        assert url == "https://solutions.ups.com/virtual-consultation-us-en-v4.html"
+        assert c.win.url_matches(url)
+    assert not c.win.url_matches("https://solutions.ups.com/manufacturing-ussp-page.html")
 
 
 def test_example_config_has_no_warnings():
@@ -214,9 +232,49 @@ def test_cli_validate(tmp_path):
     runner = CliRunner()
     ok = runner.invoke(app, ["validate", "--config", str(CONFIGS / "ups.yaml")])
     assert ok.exit_code == 0, ok.output
-    assert "is valid" in ok.output and "warning" in ok.output
+    assert "is valid" in ok.output and "warning" not in ok.output
+
+    placeholder = tmp_path / "placeholder.yaml"
+    placeholder.write_text(yaml.safe_dump(cfg(win={"url_patterns": ["https://www.acme.test/en/REPLACE-ME"]})))
+    warned = runner.invoke(app, ["validate", "--config", str(placeholder)])
+    assert warned.exit_code == 0 and "warning" in warned.output and "REPLACE-ME" in warned.output
 
     bad = tmp_path / "bad.yaml"
     bad.write_text(yaml.safe_dump(cfg(crawl={"max_pages": 0})))
     result = runner.invoke(app, ["validate", "--config", str(bad)])
     assert result.exit_code == 1
+
+
+def test_locale_filters_can_be_limited_to_some_hosts():
+    c = parse_config(cfg(scope={"locale_hosts": ["www.acme.test"]}))
+    assert not c.scope.in_scope("https://www.acme.test/fr/page")  # filtered host
+    assert c.scope.in_scope("https://blog.acme.test/any-page.html")  # not filtered
+    assert "must also be in allowed_domains" in error_for(cfg(scope={"locale_hosts": ["other.test"]}))
+
+
+def test_placeholders_only_block_the_campaign_being_crawled():
+    from pathcrawl.config import blocking_placeholders
+
+    data = cfg()
+    data["campaigns"].append({
+        "id": "todo", "name": "n", "platform": "p", "ad_copy": "REPLACE-ME",
+        "entry_links": [{"label": "l", "url": "https://www.acme.test/en/REPLACE-ME"}],
+    })
+    c = parse_config(data)
+    assert blocking_placeholders(c, "c1") == []
+    assert len(blocking_placeholders(c, "todo")) == 2
+
+
+def test_near_miss_keywords_come_from_the_patterns():
+    ups = load_config(CONFIGS / "ups.yaml").win
+    assert ups.keywords() == ["virtual-consultation"]
+    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-discount-ussp-page.html")
+    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-2023-ussp-page.html")
+    assert not ups.near_miss("https://solutions.ups.com/virtual-consultation-us-en-v4.html")  # a real win
+    assert not ups.near_miss("https://solutions.ups.com/manufacturing-ussp-page.html")
+
+    c = parse_config(cfg(win={"url_patterns": ["https://www.acme.test/en/demo*", "re:https://x\\.test/.*"]}))
+    assert c.win.keywords() == ["demo"]
+    c = parse_config(cfg(win={"near_miss_keywords": ["Book-A-Call"]}))
+    assert c.win.keywords() == ["book-a-call"]
+    assert c.win.near_miss("https://www.acme.test/en/book-a-call-today")
