@@ -513,6 +513,8 @@ def graph_from_store(store, win=None) -> tuple[nx.DiGraph, list[EntryPoint]]:
     g = build_graph(pages, edges)
     for n in g:
         g.nodes[n]["status"] = statuses.get(n)
+        # posts collected by hand (pathcrawl.seeds): outside the site, never crawled
+        g.nodes[n]["external"] = statuses.get(n) == "external"
     if win is not None:
         mark_pattern_wins(g, win, form_missing)
     return g, entries

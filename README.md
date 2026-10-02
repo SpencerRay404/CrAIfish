@@ -285,6 +285,41 @@ site itself, backed by this crawl's numbers:
 - declared page metadata (industry, journey stage, persona) to replace
   inferred tags.
 
+## External entry points (posts collected by hand)
+
+LinkedIn sits behind a login wall and is never crawled. Its posts can still be
+entry points: list them in a CSV and set `external_seeds` on the campaign.
+`data/templates/linkedin_scrape_template.csv` has the columns. Write one row
+per outbound link in a post:
+
+| column | content |
+|---|---|
+| `seed_url` | the post |
+| `post_title` | optional |
+| `outbound_url_raw` | the link as it appears (often a short link) |
+| `anchor_text`, `link_order` | optional |
+| `outbound_resolved_url` | where it lands, with its query string; the campaign tag is read from here |
+
+- **Dedupe.** Posts already in `ad_urls` or `entry_links` are skipped, and
+  repeated (post, landing page) pairs are dropped. Posts and landing pages are
+  compared with a lowercase host and without query, fragment or trailing
+  slash. A post with several links keeps them all.
+- **Nodes and edges.** Each post becomes a node with status `external` and
+  its platform as `channel`. `post_date_derived` comes from a LinkedIn
+  activity ID, where the ID shifted right by 22 bits is epoch milliseconds.
+  Each outbound link becomes a link carrying its tag, so it joins to leads
+  like any other link. A link that resolves to another post adds that post
+  as a seed.
+- **Entry links.** A landing page on an allowed domain becomes an entry link,
+  queued at depth 0, unless it already is one or is a win.
+- **Privacy.** Only the post URL, title, date and links are stored.
+
+A fresh crawl ingests the file automatically. For an existing run, use
+`pathcrawl external-seeds --run <run dir> [--config ...]`, then `pathcrawl
+crawl --resume <run dir>` to crawl the new entry links. Add `--max-pages` if
+the run stopped at its page budget. The report gets an "External entry
+points" section.
+
 ## Lead evidence
 
 With campaign tags kept on links (`scope.capture_params`, above), aggregated

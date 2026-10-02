@@ -275,6 +275,7 @@ ROLE_COLORS = {
     "win": (44, 160, 44),        # green
     "crawled": (150, 150, 150),  # grey
     "uncrawled": (255, 160, 60), # orange
+    "external": (10, 102, 194),  # LinkedIn-ish blue: posts collected by hand
 }
 TOP_HUBS = 10
 
@@ -339,6 +340,8 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
 
     def role(n):
         d = g.nodes[n]
+        if d.get("external"):
+            return "external"
         if n in entry_urls:
             return "entry"
         if d["win"]:
@@ -357,7 +360,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
         red, green, blue = ROLE_COLORS[r]
         x, y = (float(v) for v in layout[n])
         out.nodes[n].update(
-            label=(c.title if c and c.title else n) if (r in ("entry", "win") or n in hubs) else "",
+            label=(c.title if c and c.title else n) if (r in ("entry", "win", "external") or n in hubs) else "",
             role=r,
             in_degree=indeg[n],
             title=(c.title or "") if c else "",
@@ -365,6 +368,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             page_type=c.page_type if c else "",
             status=g.nodes[n].get("status") or "",
             win_type=g.nodes[n].get("win_type") or "",
+            external=bool(g.nodes[n].get("external")),
             **(annotations.node(n) if annotations else {}),
             viz={
                 "color": {"r": red, "g": green, "b": blue, "a": 1.0},
@@ -547,6 +551,48 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     return "\n".join(L)
 
 
+# --------------------------------------------------------------------------- external seeds
+
+
+def external_seed_rows(run) -> list[dict]:
+    store, g = run.store, run.graph
+    rows = []
+    for p in store.db.execute("SELECT url, title, channel, post_date_derived FROM pages WHERE status = 'external' ORDER BY url"):
+        links = store.db.execute("SELECT href, url, mc_id, in_scope FROM links WHERE src = ? ORDER BY id", (p["url"],)).fetchall()
+        rows.append({
+            "url": p["url"], "title": p["title"], "channel": p["channel"], "post_date_derived": p["post_date_derived"],
+            "links": [{
+                "target": lk["url"], "mc_id": lk["mc_id"], "in_scope": bool(lk["in_scope"]),
+                "target_is_win": bool(lk["url"] in g and g.nodes[lk["url"]]["win"]),
+                "target_status": g.nodes[lk["url"]].get("status") if lk["url"] in g else None,
+            } for lk in links],
+        })
+    return rows
+
+
+def external_seed_section(run, short) -> list[str]:
+    meta = run.store.meta("external_seeds") or {}
+    rows = external_seed_rows(run)
+    L = ["## External entry points", ""]
+    L.append(f"{len(rows)} posts collected by hand ({Path(meta.get('file', '')).name}), never crawled. "
+             f"{len(meta.get('skipped_seeds', []))} were skipped as already listed (ad URLs or entry links) and "
+             f"{meta.get('duplicate_rows', 0)} duplicate rows dropped. {len(meta.get('new_entries', []))} landing "
+             f"pages became entry links; {len(meta.get('existing_entries', []))} already were.")
+    L.append("")
+    L.append("| post | date | lands on | tag |")
+    L.append("|---|---|---|---|")
+    for r in rows:
+        title = (r["title"] or r["url"]).replace("|", "/")[:70]
+        if not r["links"]:
+            L.append(f"| {title} | {r['post_date_derived'] or '-'} | (no landing page) | - |")
+        for lk in r["links"]:
+            note = " (win)" if lk["target_is_win"] else "" if lk["in_scope"] else " (outside the crawl)"
+            L.append(f"| {title} | {r['post_date_derived'] or '-'} | {short(lk['target']) if lk['target'] else '-'}{note} "
+                     f"| {lk['mc_id'] or '-'} |")
+    L.append("")
+    return L
+
+
 # --------------------------------------------------------------------------- entities
 
 
@@ -693,6 +739,9 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
         annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
         extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
         report["leads"] = {k: v for k, v in (store.meta("leads") or {}).items() if k not in ("tags", "conversion_pages")}
+    if store.meta("external_seeds"):
+        extra += external_seed_section(run, short)
+        report["external_seeds"] = external_seed_rows(run)
     findings = site_findings(store, categories, [w["url"] for w in report["win_pages"]],
                              [m["url"] for m in report["win_near_misses"]], entity_rows)
     report["site_findings"] = findings

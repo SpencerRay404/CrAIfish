@@ -319,6 +319,28 @@ def test_campaign_tag_is_stored_on_the_link(make_site, tmp_path):
     assert link["url"] == site.base + "/win.html" and link["mc_id"] == "ONLINE_WEB_X_1"
 
 
+def test_external_seed_landing_pages_are_crawled_as_entries(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html("<p>start</p>")),
+        "/from-post.html": (200, {}, html('<a href="/win.html">Talk</a>')),
+        "/win.html": WIN,
+    })
+    seeds = tmp_path / "seeds.csv"
+    seeds.write_text("seed_url,post_title,outbound_url_raw,outbound_resolved_url\n"
+                     f"https://www.linkedin.com/pulse/p/,Post,https://lnkd.in/x,{site.base}/from-post.html?WT.mc_id=T1\n")
+    cfg = config_for(site, ["/start.html"])
+    cfg.scope.strip_query_params = ["WT.*"]
+    cfg.scope.capture_params = ["WT.mc_id"]
+    cfg.campaigns[0].external_seeds = str(seeds)
+    (tmp_path / "run").mkdir()
+    c, status = crawl(cfg, tmp_path / "run")
+    assert status == "complete"
+    assert page_row(c, site.base + "/from-post.html")["status"] == "ok"
+    assert page_row(c, "https://www.linkedin.com/pulse/p")["status"] == "external"
+    assert [e["label"] for e in c.store.entries()] == ["start.html", "test: Post"]
+    assert "linkedin" not in " ".join(site.requests)
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)

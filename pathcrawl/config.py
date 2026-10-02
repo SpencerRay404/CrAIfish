@@ -265,6 +265,10 @@ class CampaignConfig(_Strict):
     # never crawled: the crawl starts at entry_links.
     ad_urls: list[str] = []
     entry_links: list[EntryLink] = Field(min_length=1)
+    # A CSV of posts collected by hand (see pathcrawl/seeds.py): each post
+    # becomes an external node linking to the pages it points at, and new
+    # landing pages become entry links. Relative to where pathcrawl runs.
+    external_seeds: str | None = None
 
 
 class CrawlConfig(_Strict):

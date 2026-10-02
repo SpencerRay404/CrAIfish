@@ -515,3 +515,40 @@ def _run_leads(r) -> None:
         f"{len(pages)} pages carry allocated leads. Wrote {escape(str(out))}",
         highlight=False, soft_wrap=True,
     )
+
+
+@app.command("external-seeds")
+def external_seeds_cmd(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+    seeds: Path | None = typer.Option(None, "--seeds", help="Seed CSV (default: the campaign's external_seeds)."),
+) -> None:
+    """Add hand-collected posts (e.g. LinkedIn) to a run as external entry points.
+
+    New landing pages are queued; crawl them with pathcrawl crawl --resume."""
+    from pathcrawl.seeds import SeedFileError, ingest
+
+    r = _open(run, config)
+    try:
+        try:
+            campaign = r.config.campaign(r.store.meta("campaign_id") or r.config.campaigns[0].id)
+        except ConfigError as e:
+            err_console.print(f"[bold red]external-seeds:[/] {escape(str(e))}")
+            raise typer.Exit(code=2) from None
+        path = seeds or (Path(campaign.external_seeds) if campaign.external_seeds else None)
+        if path is None:
+            err_console.print("[bold red]external-seeds:[/] no seed file; pass --seeds or set external_seeds")
+            raise typer.Exit(code=2)
+        try:
+            result = ingest(r.store, r.config, campaign, path)
+        except SeedFileError as e:
+            err_console.print(f"[bold red]external-seeds:[/] {escape(str(e))}", highlight=False)
+            raise typer.Exit(code=1) from None
+    finally:
+        r.close()
+    console.print(f"{len(result.seeds)} posts added; {len(result.skipped_seeds)} skipped (already ad URLs or entry "
+                  f"links), {result.duplicate_rows} duplicate rows. {len(result.new_entries)} new entry links queued, "
+                  f"{len(result.existing_entries)} already entry links.", highlight=False, soft_wrap=True)
+    if result.new_entries:
+        console.print("Crawl the new entry links with:")
+        console.print(escape(f"pathcrawl crawl --resume {run}"), soft_wrap=True, highlight=False)

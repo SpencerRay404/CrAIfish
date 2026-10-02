@@ -266,6 +266,16 @@ class Crawler:
             url = self.scope.normalize(link.url)
             self.store.add_entry(i, link.label, link.url, url)
             self.store.enqueue(url, 0, None)
+        if self.campaign.external_seeds and not Path(self.campaign.external_seeds).exists():
+            self.console.print(f"[yellow]External seed file {escape(self.campaign.external_seeds)} not found; "
+                               "crawling the configured entry links only.[/]")
+        elif self.campaign.external_seeds:
+            from pathcrawl.seeds import ingest
+
+            r = ingest(self.store, self.config, self.campaign, Path(self.campaign.external_seeds))
+            self.console.print(f"External seeds: {len(r.seeds)} posts, {len(r.new_entries)} new entry links "
+                               f"({len(r.skipped_seeds)} posts already listed, {r.duplicate_rows} duplicate rows)",
+                               highlight=False)
 
     # ------------------------------------------------------------------ main loop
 

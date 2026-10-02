@@ -103,6 +103,10 @@ campaigns:
         url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/win-customer-loyalty-with-omnichannel-retail-strategies"
       - label: "Mastering omnichannel strategy (retail)"
         url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/mastering-your-omnichannel-strategy-for-retail-growth"
+    # LinkedIn posts collected by hand (local file, not in the repo; template in
+    # data/templates/). Each post becomes an external node, and new UPS landing
+    # pages are added as entry links at crawl time.
+    external_seeds: "data/ups/linkedin_scrape.csv"
 
 # Aggregated lead counts per WT.mc_id (counts only; never the raw CRM export).
 # The file is local and not in the repo. pathcrawl leads / report join it to

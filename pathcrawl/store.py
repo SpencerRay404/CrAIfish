@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE TABLE IF NOT EXISTS pages (
     url TEXT PRIMARY KEY,
     requested_url TEXT,
-    status TEXT NOT NULL,             -- ok, http_error, skipped, robots, offsite, not_fetched
+    status TEXT NOT NULL,             -- ok, http_error, skipped, robots, offsite, not_fetched, external
     depth INTEGER,
     http_status INTEGER,
     load_ms INTEGER,
@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS page_entities (
 # upgraded in place when opened: (table, column, SQL type).
 MIGRATIONS = [
     ("links", "mc_id", "TEXT"),
+    ("pages", "channel", "TEXT"),             # external seeds: e.g. linkedin
+    ("pages", "post_date_derived", "TEXT"),   # external seeds: date from the post ID
 ]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
@@ -288,6 +290,11 @@ class Store:
                 self.db.execute("UPDATE queue SET state = 'done' WHERE url = ?", (queue_url,))
             # The final URL may itself be queued (reached directly elsewhere); it is done now.
             self.db.execute("UPDATE queue SET state = 'done' WHERE url = ? AND state = 'pending'", (page.url,))
+
+    def set_external(self, url: str, channel: str | None, post_date: str | None) -> None:
+        with self.db:
+            self.db.execute("UPDATE pages SET channel = ?, post_date_derived = ? WHERE url = ?",
+                            (channel, post_date, url))
 
     def add_alias(self, url: str, final_url: str) -> None:
         """``url`` turned out to be another spelling of an already-crawled page."""
