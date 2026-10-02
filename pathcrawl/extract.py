@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
@@ -165,6 +165,12 @@ class PageData:
     jsonld_types: list[str]  # empty = no structured data found
     form_present: bool | None  # None when no form_selector is configured
     text: str
+    # Machine-readability signals beyond JSON-LD (website health view)
+    microdata_types: list[str] = field(default_factory=list)  # itemtype values (last path segment)
+    rdfa_types: list[str] = field(default_factory=list)  # typeof values
+    og_properties: list[str] = field(default_factory=list)  # og:* meta properties present
+    hreflang: list[str] = field(default_factory=list)  # languages of <link rel=alternate hreflang>
+    robots_meta: str | None = None  # content of <meta name=robots>
 
 
 def extract_page(html: str, page_url: str, form_selector: str | None = None) -> PageData:
@@ -195,6 +201,19 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
 
     form_present = bool(soup.select_one(form_selector)) if form_selector else None
 
+    microdata = {_schema_name(str(t)) for el in soup.find_all(attrs={"itemtype": True})
+                 for t in str(el["itemtype"]).split()}
+    microdata |= {"(untyped)" for el in soup.find_all(attrs={"itemscope": True}) if not el.get("itemtype")}
+    rdfa = {_schema_name(t) for el in soup.find_all(attrs={"typeof": True}) for t in str(el["typeof"]).split()}
+    og = {str(m.get("property")).lower() for m in soup.find_all("meta", attrs={"property": True})
+          if str(m.get("property")).lower().startswith("og:")}
+    hreflang = set()
+    for link in soup.find_all("link", attrs={"hreflang": True}):
+        rel = link.get("rel") or []
+        if "alternate" in [r.lower() for r in (rel if isinstance(rel, list) else [rel])]:
+            hreflang.add(str(link["hreflang"]).strip().lower())
+    robots = soup.find("meta", attrs={"name": lambda v: v and v.lower() == "robots"})
+
     return PageData(
         title=title,
         meta_description=description,
@@ -203,7 +222,18 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
         jsonld_types=sorted(set(types)),
         form_present=form_present,
         text=visible_text(html),
+        microdata_types=sorted(microdata),
+        rdfa_types=sorted(rdfa),
+        og_properties=sorted(og),
+        hreflang=sorted(hreflang),
+        robots_meta=" ".join(str(robots.get("content", "")).split()).lower() or None if robots else None,
     )
+
+
+def _schema_name(t: str) -> str:
+    """``https://schema.org/Article`` -> ``Article``; ``schema:Article`` -> ``Article``."""
+    t = t.strip().rstrip("/")
+    return t.rsplit("/", 1)[-1].rsplit(":", 1)[-1].rsplit("#", 1)[-1] or t
 
 
 # A few phrases that bot walls and CAPTCHA interstitials reliably show.

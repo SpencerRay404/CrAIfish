@@ -33,6 +33,8 @@ from pathcrawl.coverage import (
 from pathcrawl.graph import ALL_LINKS, CONTENT_ONLY, MODES, Analysis, distances_to_win, edge_counts, mode_view
 from pathcrawl.dead import dead_annotations, dead_links, dead_pages, dead_section
 from pathcrawl.dead import write_csv as write_dead_csv
+from pathcrawl.health import health_annotations, health_section, page_health
+from pathcrawl.health import write_csv as write_health_csv
 from pathcrawl.leads import lead_annotations, lead_section
 
 DEFINITIONS = {
@@ -553,6 +555,16 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     return "\n".join(L)
 
 
+# --------------------------------------------------------------------------- health
+
+
+def health_home(run) -> str | None:
+    """The page click depth is counted from: health.home_url, else the first entry link."""
+    if run.config.health.home_url:
+        return run.store.resolve(run.config.scope.normalize(run.config.health.home_url) or run.config.health.home_url)
+    return run.entries[0].url if run.entries else None
+
+
 # --------------------------------------------------------------------------- external seeds
 
 
@@ -752,6 +764,16 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     paths[f"{run.config.client.slug}_dead_pages.csv"] = out / f"{run.config.client.slug}_dead_pages.csv"
     write_dead_csv(dead_links(store), dead_pages(store), paths[f"{run.config.client.slug}_dead_pages.csv"])
     report["dead_pages"] = {"count": len(dead_nodes), "pages": dead_nodes}
+    home = health_home(run)
+    health_rows = page_health(run, categories, home)
+    extra_recorded = bool(store.db.execute("SELECT 1 FROM pages WHERE og_properties IS NOT NULL LIMIT 1").fetchone())
+    site_signals = store.meta("site_signals") or {}
+    health_md, health_summary = health_section(health_rows, home, site_signals, short, extra_recorded)
+    paths[f"{run.config.client.slug}_site_health.csv"] = out / f"{run.config.client.slug}_site_health.csv"
+    write_health_csv(health_rows, paths[f"{run.config.client.slug}_site_health.csv"])
+    annotations.add_nodes({"has_structured_data": False, "js_dependent": False, "clicks_from_home_body_links": -1,
+                           "clicks_from_home_all_links": -1}, health_annotations(health_rows))
+    report["health"] = {"home_url": home, "summary": health_summary, "site_signals": site_signals}
     if store.meta("external_seeds"):
         extra += external_seed_section(run, short)
         report["external_seeds"] = external_seed_rows(run)
@@ -759,6 +781,7 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
                              [m["url"] for m in report["win_near_misses"]], entity_rows)
     report["site_findings"] = findings
     extra += recommendations_markdown(findings, run.config.win.name)
+    extra += health_md
     if annotations.node_defaults:
         report["nodes"] = {n: annotations.node(n) for n in sorted(run.graph)}
     if annotations.edge_defaults:

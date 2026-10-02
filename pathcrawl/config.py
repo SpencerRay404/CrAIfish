@@ -324,6 +324,17 @@ class LeadsConfig(_Strict):
         return v
 
 
+class HealthConfig(_Strict):
+    """Website health view (pathcrawl/health.py)."""
+
+    # Click depth is counted from here. Default: the campaign's first entry link.
+    home_url: str | None = None
+    # AI crawlers whose robots.txt rules are recorded. Default: health.AI_CRAWLERS.
+    ai_crawlers: list[str] = []
+    # Fetch robots.txt, llms.txt and sitemaps per host at the end of a crawl.
+    check_site_files: bool = True
+
+
 class Config(_Strict):
     client: ClientConfig
     scope: ScopeConfig
@@ -331,6 +342,7 @@ class Config(_Strict):
     campaigns: list[CampaignConfig] = Field(min_length=1)
     crawl: CrawlConfig = CrawlConfig()
     leads: LeadsConfig = LeadsConfig()
+    health: HealthConfig = HealthConfig()
 
     @model_validator(mode="after")
     def _check_campaigns(self) -> Config:

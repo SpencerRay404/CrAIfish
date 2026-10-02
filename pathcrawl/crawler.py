@@ -348,6 +348,8 @@ class Crawler:
                 self._resume_hint("The browser window was closed; progress saved.")
             finally:
                 self.store.set_meta(status=status, finished_at=datetime.now(UTC).isoformat(timespec="seconds"))
+                if status in ("complete", "budget") and self.config.health.check_site_files:
+                    self._site_signals(context.request)
                 for closeable in (context, browser):
                     try:
                         closeable.close()
@@ -355,6 +357,19 @@ class Crawler:
                         pass  # already closed by the person watching
         self._summary()
         return status
+
+    def _site_signals(self, request) -> None:
+        """robots.txt AI rules, llms.txt and sitemap coverage per crawled host (a few requests each)."""
+        from pathcrawl.health import collect_site_signals, playwright_fetch, site_bases
+
+        try:
+            crawled = [r["url"] for r in self.store.db.execute(
+                "SELECT url FROM pages WHERE status IN ('ok', 'http_error')")]
+            signals = collect_site_signals(site_bases(crawled, self.scope.allowed_domains), playwright_fetch(request), crawled, self.scope.normalize,
+                                           self.config.health.ai_crawlers or None)
+            self.store.set_meta(site_signals=signals)
+        except Exception as e:  # never lose a finished crawl over this
+            self.console.print(f"[yellow]Site files not checked: {escape(str(e).splitlines()[0] if str(e) else '')}[/]")
 
     def _resume_hint(self, what: str) -> None:
         self.console.print(f"[yellow]{what} Resume with: pathcrawl crawl --resume {escape(str(self.run_dir))}[/]")
@@ -658,6 +673,11 @@ class Crawler:
             win_source=win_source,
             dead_reason=dead_reason,
             is_dead=dead_reason is not None,
+            microdata_types=data.microdata_types,
+            rdfa_types=data.rdfa_types,
+            og_properties=data.og_properties,
+            hreflang=data.hreflang,
+            robots_meta=data.robots_meta,
         )
 
     def _follow_operator_url(self, src: str, depth: int, decision: Decision) -> None:

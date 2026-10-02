@@ -120,6 +120,10 @@ leads:
   allocation: "even_split_across_source_pages"
   min_cell: 5
 
+# Website health view: click depth is counted from the US home page.
+health:
+  home_url: "https://www.ups.com/us/en/home"
+
 crawl:
   max_depth: 8
   max_pages: 5000   # pages per run; raise with --max-pages for a bigger map

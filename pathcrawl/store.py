@@ -117,6 +117,12 @@ MIGRATIONS = [
     ("pages", "post_date_derived", "TEXT"),   # external seeds: date from the post ID
     ("pages", "is_dead", "INTEGER"),          # 404/410 or a soft 404 (pathcrawl.extract.detect_dead)
     ("pages", "dead_reason", "TEXT"),
+    # machine-readability signals (website health); NULL = not recorded by this crawl
+    ("pages", "microdata_types", "TEXT"),     # JSON list
+    ("pages", "rdfa_types", "TEXT"),          # JSON list
+    ("pages", "og_properties", "TEXT"),       # JSON list
+    ("pages", "hreflang", "TEXT"),            # JSON list
+    ("pages", "robots_meta", "TEXT"),
 ]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
@@ -152,6 +158,11 @@ class PageRecord:
     error: str | None = None
     is_dead: bool | None = None
     dead_reason: str | None = None
+    microdata_types: list[str] | None = None
+    rdfa_types: list[str] | None = None
+    og_properties: list[str] | None = None
+    hreflang: list[str] | None = None
+    robots_meta: str | None = None
 
 
 @dataclass
@@ -269,8 +280,9 @@ class Store:
                 """INSERT OR REPLACE INTO pages(url, requested_url, status, depth, http_status, load_ms,
                    redirect_chain, canonical, title, meta_description, headings, body_text, form_present,
                    jsonld_types, raw_text_len, rendered_text_len, js_dependent, screenshot, win, win_source,
-                   error, crawled_at, is_dead, dead_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   error, crawled_at, is_dead, dead_reason, microdata_types, rdfa_types, og_properties,
+                   hreflang, robots_meta)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     page.url, page.requested_url, page.status, page.depth, page.http_status, page.load_ms,
                     json.dumps(page.redirect_chain), page.canonical, page.title, page.meta_description,
@@ -281,6 +293,9 @@ class Store:
                     None if page.js_dependent is None else int(page.js_dependent),
                     page.screenshot, int(page.win), page.win_source, page.error, now(),
                     None if page.is_dead is None else int(page.is_dead), page.dead_reason,
+                    *(None if v is None else json.dumps(v)
+                      for v in (page.microdata_types, page.rdfa_types, page.og_properties, page.hreflang)),
+                    page.robots_meta,
                 ),
             )
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))

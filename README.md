@@ -341,6 +341,53 @@ The report's **Dead pages** section lists:
 and edges carry `to_dead`. A post's landing page that is dead keeps its edge
 (flagged `to_dead`) and is never made an entry link.
 
+## Website health
+
+Every report has a **Website health** section, and `<client>_site_health.csv`
+has one row per loaded page. The section covers dead pages, how easy content
+is to reach, and how machine-readable each page is for search engines and AI
+agents.
+
+**Per page**
+- **Click depth from home**, counted twice: over every link
+  (`clicks_from_home_all_links`) and over body links only
+  (`clicks_from_home_body_links`). The start page is `health.home_url`, or
+  else the first entry link.
+- **Inbound links**: `inbound_links`, plus `is_dead` and
+  `dead_inbound_pages`.
+- **Titles and descriptions**: `has_title`, `title_duplicated`,
+  `has_meta_description` and `meta_duplicated`. Duplicate means the same
+  lowercased text on more than one loaded page.
+- **Structure**: `h1_count` and `canonical_self`.
+- **Structured data**: `structured_data_types` (JSON-LD) and
+  `has_structured_data` (JSON-LD, Microdata or RDFa), reported separately
+  from `microdata_types`, `rdfa_types` and `og_properties` (Open Graph).
+- **Language and indexing**: `hreflang` and `robots_meta`.
+- **JavaScript dependence**: `js_dependent` (the raw HTML has under half the
+  rendered text) and `raw_text_share`.
+- **Redirects and leads**: `redirect_hops`, `carries_lead_tags` and
+  `leads_allocated`.
+
+Microdata, RDFa, Open Graph, hreflang and the robots meta tag are recorded
+from the rendered page. Runs crawled before this change don't have them,
+and the report says so.
+
+**Per host**
+- the robots.txt rules for named AI crawlers (GPTBot, ClaudeBot,
+  PerplexityBot, Google-Extended and others; set `health.ai_crawlers` to
+  change the list);
+- whether `llms.txt` exists;
+- the declared sitemaps, and how many crawled pages they list.
+
+These are fetched once per host at the end of a crawl. Turn that off with
+`health.check_site_files: false`, or fetch them for an existing run with
+`pathcrawl site-signals --run <run dir>`.
+
+**Breakdowns and graph attributes.** The report breaks the signals down by
+section and by page type, with a separate row for pages carrying leads.
+`graph.gexf` and `report.json` carry `is_dead`, `has_structured_data`,
+`js_dependent` and both click depths.
+
 ## Lead evidence
 
 With campaign tags kept on links (`scope.capture_params`, above), aggregated

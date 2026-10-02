@@ -553,3 +553,31 @@ def external_seeds_cmd(
     if result.new_entries:
         console.print("Crawl the new entry links with:")
         console.print(escape(f"pathcrawl crawl --resume {run}"), soft_wrap=True, highlight=False)
+
+
+@app.command("site-signals")
+def site_signals_cmd(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
+    """Check robots.txt AI-crawler rules, llms.txt and sitemap coverage for each crawled host.
+
+    A few requests per host (robots.txt, llms.txt, the sitemaps robots.txt declares)."""
+    from pathcrawl.health import collect_site_signals, site_bases, urllib_fetch
+
+    r = _open(run, config)
+    try:
+        crawled = [x["url"] for x in r.store.db.execute("SELECT url FROM pages WHERE status IN ('ok', 'http_error')")]
+        ua = r.store.meta("user_agent") or "pathcrawl"
+        signals = collect_site_signals(site_bases(crawled, r.config.scope.allowed_domains), urllib_fetch(ua), crawled, r.config.scope.normalize,
+                                       r.config.health.ai_crawlers or None)
+        r.store.set_meta(site_signals=signals)
+    finally:
+        r.close()
+    for host, h in signals.items():
+        blocked = [b for b, v in h["ai_crawlers"].items() if not v["allowed_home"]]
+        console.print(f"{escape(host)}: robots.txt {'yes' if h['robots_txt'] else 'no'}, "
+                      f"AI crawlers blocked from home: {len(blocked)}, llms.txt {'yes' if h['llms_txt'] else 'no'}, "
+                      f"sitemap URLs {h['sitemap_urls']}, crawled pages in sitemap "
+                      f"{h['crawled_pages_in_sitemap']}/{h['crawled_pages']}", highlight=False, soft_wrap=True)
+    console.print("Saved; run pathcrawl report to include them.")

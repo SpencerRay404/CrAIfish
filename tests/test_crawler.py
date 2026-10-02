@@ -354,6 +354,21 @@ def test_dead_pages_are_recorded(make_site, tmp_path):
     assert page_row(c, site.base + "/start.html")["is_dead"] == 0
 
 
+def test_health_signals_are_recorded(make_site, tmp_path):
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: GPTBot\nDisallow: /\n"),
+        "/llms.txt": (200, {"Content-Type": "text/plain"}, "# Test site\n"),
+        "/start.html": (200, {}, html('<div itemscope itemtype="https://schema.org/Product">p</div>',
+                                      head='<meta property="og:title" content="x"><meta name="robots" content="index">')),
+    })
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    row = page_row(c, site.base + "/start.html")
+    assert (row["og_properties"], row["microdata_types"], row["robots_meta"]) == ('["og:title"]', '["Product"]', "index")
+    signals = c.store.meta("site_signals")
+    h = signals[site.base.split("//")[1]]
+    assert h["robots_txt"] and h["llms_txt"] and h["ai_crawlers"]["GPTBot"]["allowed_home"] is False
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)
