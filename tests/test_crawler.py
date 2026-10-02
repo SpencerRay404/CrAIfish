@@ -306,6 +306,19 @@ def test_a_crash_is_recorded_as_paused_not_complete(make_site, tmp_path, monkeyp
     assert c.store.meta("status") == "quit"
 
 
+def test_campaign_tag_is_stored_on_the_link(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html('<main><a href="/win.html?WT.mc_id=ONLINE_WEB_X_1">Talk</a></main>')),
+        "/win.html": WIN,
+    })
+    cfg = config_for(site, ["/start.html"])
+    cfg.scope.strip_query_params = ["WT.*"]
+    cfg.scope.capture_params = ["WT.mc_id"]
+    c, _ = crawl(cfg, tmp_path)
+    (link,) = list(c.store.links())
+    assert link["url"] == site.base + "/win.html" and link["mc_id"] == "ONLINE_WEB_X_1"
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)

@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS links (
     text TEXT,
     region TEXT,
     in_scope INTEGER NOT NULL,
-    operator INTEGER NOT NULL DEFAULT 0
+    operator INTEGER NOT NULL DEFAULT 0,
+    mc_id TEXT                        -- campaign tag from the raw href (scope.capture_params)
 );
 CREATE INDEX IF NOT EXISTS links_src ON links(src);
 CREATE TABLE IF NOT EXISTS operator_actions (
@@ -94,6 +95,12 @@ CREATE TABLE IF NOT EXISTS page_entities (
     PRIMARY KEY (url, entity_type, entity)
 );
 """
+
+# Columns added after the first release, so databases from older runs are
+# upgraded in place when opened: (table, column, SQL type).
+MIGRATIONS = [
+    ("links", "mc_id", "TEXT"),
+]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
 EXPLORED_STATUSES = ("ok", "http_error")
@@ -136,6 +143,7 @@ class LinkRecord:
     region: str
     in_scope: bool
     operator: bool = False
+    mc_id: str | None = None
 
 
 @dataclass
@@ -151,7 +159,14 @@ class Store:
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
+
+    def _migrate(self) -> None:
+        for table, column, sql_type in MIGRATIONS:
+            existing = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
     def close(self) -> None:
         self.db.close()
@@ -250,8 +265,9 @@ class Store:
             )
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))
             self.db.executemany(
-                "INSERT INTO links(src, href, url, text, region, in_scope, operator) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator)) for lk in links],
+                "INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator), lk.mc_id)
+                 for lk in links],
             )
             for alias in {page.url, page.requested_url, *page.redirect_chain} - {None}:
                 self.db.execute("INSERT OR REPLACE INTO aliases(url, final_url) VALUES (?, ?)", (alias, page.url))

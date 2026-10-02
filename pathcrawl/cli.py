@@ -209,24 +209,30 @@ def _to_jsonable(value: object) -> object:
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
-def _open(run: Path):
+CONFIG_HELP = "Client config to use instead of the run's saved copy (for settings added since the crawl)."
+
+
+def _open(run: Path, config: Path | None = None):
     from pathcrawl.run import RunError, open_run
 
     try:
-        return open_run(run)
+        return open_run(run, config)
     except (RunError, ConfigError) as e:
         err_console.print(f"[bold red]error:[/] {escape(str(e))}")
         raise typer.Exit(code=2) from None
 
 
 @app.command()
-def analyze(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
+def analyze(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
     """Compute every path metric for a crawl and save analysis.json."""
     import json
 
     from pathcrawl.graph import MODES
 
-    r = _open(run)
+    r = _open(run, config)
     result = r.analyze()
     (run / "analysis.json").write_text(json.dumps(result.to_dict(), indent=2, default=_to_jsonable))
 
@@ -259,12 +265,15 @@ def analyze(run: Path = typer.Option(..., "--run", help="A run directory from pa
 
 
 @app.command()
-def categorize(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
+def categorize(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
     """Categorize every crawled page (section, page type, reachability, content signals) into categories.csv."""
     from pathcrawl.categorize import categorize as categorize_pages
     from pathcrawl.categorize import summarize, write_csv
 
-    r = _open(run)
+    r = _open(run, config)
     rows = categorize_pages(r.store, r.graph, r.analyze(), r.config.scope.locale_include)
     write_csv(rows, run / "categories.csv")
     summary = summarize(rows)
@@ -285,6 +294,7 @@ def report(
     taxonomy: Path | None = typer.Option(
         None, "--taxonomy", help="Entity taxonomy (default: configs/<client>.entities.yaml, else the run's copy)."
     ),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
 ) -> None:
     """Write every report file for a run (report.md, report.json, graphs, CSVs).
 
@@ -292,10 +302,10 @@ def report(
     to the taxonomy show up in the report without re-crawling."""
     from pathcrawl.report import headline, write_report
 
-    r = _open(run)
+    r = _open(run, config)
     r.close()
     _extract_entities(run, r.config.client.slug, taxonomy)
-    r = _open(run)
+    r = _open(run, config)
     paths = write_report(r)
     console.print(f"[bold]{escape(headline(r.analyze(), r.config.win.name))}[/]")
     r.close()
@@ -427,3 +437,35 @@ def entities_accept(
     console.print(f"Added {len(added)} entities to {escape(str(taxonomy))}:")
     for a in added:
         console.print(f"  {escape(a)}", highlight=False)
+
+
+@app.command("backfill-links")
+def backfill_links_cmd(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(
+        None, "--config", "-c",
+        help="Client config for capture_params (default: the run's copy, else configs/<client>.yaml).",
+    ),
+) -> None:
+    """Fill columns added since a run was crawled (link campaign tags), from its crawl.db. Fetches nothing."""
+    from pathcrawl.backfill import backfill_links
+
+    r = _open(run, config)
+    if not r.config.scope.capture_params and config is None:
+        live = Path("configs") / f"{r.config.client.slug}.yaml"
+        if live.exists():
+            r.close()
+            r = _open(run, live)
+            console.print(f"Using {escape(str(live))} (the run's saved config has no capture_params)")
+    if not r.config.scope.capture_params:
+        err_console.print("[yellow]scope.capture_params is empty; no link tags to fill. Set it, e.g. "
+                          '["WT.mc_id"], or pass --config.[/]')
+    s = backfill_links(r.store, r.config.scope)
+    r.close()
+    console.print(f"Links: {s.links_tagged} of {s.links} carry a tag ({', '.join(r.config.scope.capture_params) or '-'}); "
+                  f"{s.distinct_tags} distinct tags on {s.source_pages} source pages.", highlight=False, soft_wrap=True)
+    if s.duplicate_pages:
+        console.print(f"[yellow]{len(s.duplicate_pages)} pages were stored under more than one URL that now "
+                      "normalize the same (e.g. a stripped tracking param). Not merged; re-crawl to merge:[/]")
+        for group in s.duplicate_pages[:20]:
+            console.print("  " + escape(" = ".join(group)), highlight=False, soft_wrap=True)

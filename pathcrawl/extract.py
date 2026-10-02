@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
-from pathcrawl.normalize import normalize_url
+from pathcrawl.normalize import captured_param, normalize_url
 
 NAV, HEADER, FOOTER, BODY = "nav", "header", "footer", "body"
 # Site chrome: links here are excluded in "content links only" mode.
@@ -33,6 +33,7 @@ class Link:
     url: str | None  # normalized absolute URL, or None if not crawlable (mailto:, etc.)
     text: str  # anchor text, falling back to aria-label / title / image alt
     region: str  # nav, header, footer or body
+    mc_id: str | None = None  # campaign tag from the raw href (scope.capture_params)
 
 
 def _anchor_text(a: Tag) -> str:
@@ -82,11 +83,14 @@ def extract_links(
     page_url: str,
     strip_params: Iterable[str] = (),
     region_selectors: dict[str, list[str]] | None = None,
+    capture_params: Iterable[str] = (),
 ) -> list[Link]:
     """Every ``<a href>`` on the page, in document order.
 
     ``region_selectors`` maps nav/header/footer to extra CSS selectors (from the
     client config) for menus that aren't built from semantic elements.
+    ``capture_params`` names query params (e.g. ``WT.mc_id``) whose value is kept
+    on the link as ``mc_id`` before normalization strips them from the URL.
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -111,6 +115,7 @@ def extract_links(
                 url=normalize_url(href, base=base, strip_params=strip),
                 text=_anchor_text(a),
                 region=link_region(a, custom),
+                mc_id=captured_param(href, capture_params),
             )
         )
     return links

@@ -577,9 +577,10 @@ class Crawler:
                     continue
 
             links = [
-                LinkRecord(lk.href, lk.url, lk.text, lk.region, bool(lk.url and self.scope.in_scope(lk.url)))
+                LinkRecord(lk.href, lk.url, lk.text, lk.region, bool(lk.url and self.scope.in_scope(lk.url)),
+                           mc_id=lk.mc_id)
                 for lk in extract_links(visit.html, final, self.scope.strip_query_params,
-                                        self.scope.region_selectors.model_dump())
+                                        self.scope.region_selectors.model_dump(), self.scope.capture_params)
             ]
             crawlable = {lk.url for lk in links if lk.in_scope and lk.url != final}
             # A win page with nowhere to go is fine: the journey is already complete.

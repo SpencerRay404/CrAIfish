@@ -76,6 +76,10 @@ class ScopeConfig(_Strict):
     # but solutions.ups.com/some-page.html).
     locale_hosts: list[str] = []
     strip_query_params: list[str] = []
+    # Query params whose value is kept on each link (as links.mc_id) before it
+    # is stripped for node identity, e.g. ["WT.mc_id"]. Names match
+    # case-insensitively; the first one present on a link wins.
+    capture_params: list[str] = []
     region_selectors: RegionSelectors = RegionSelectors()
 
     @field_validator("allowed_domains")

@@ -340,6 +340,12 @@ the output directory `runs/<slug>/...`.
   e.g. `www.ups.com/us/en/...` but `solutions.ups.com/some-page.html`.
 - **`strip_query_params`**: query params removed before URLs are compared.
   Globs are allowed (`utm_*`), and matching ignores case.
+- **`capture_params`** (optional): query params whose value is kept on each
+  link before being stripped, e.g. `["WT.mc_id"]`. The value is stored in
+  `links.mc_id` so lead counts can be joined to the link that carried the
+  tag. For a run crawled before this existed, `pathcrawl backfill-links --run
+  <run dir>` fills it from the raw hrefs in `crawl.db`, fetching nothing. It
+  also lists pages stored under two URLs that now normalize the same.
 - **`region_selectors`** (optional): extra CSS selectors for `nav`,
   `header` and `footer`. Links inside `<nav>`, `<header>` and `<footer>`
   (and the matching ARIA roles) are classified automatically. Add selectors
