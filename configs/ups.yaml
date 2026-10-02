@@ -88,6 +88,18 @@ campaigns:
       - label: "Mastering omnichannel strategy (retail)"
         url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/mastering-your-omnichannel-strategy-for-retail-growth"
 
+# Aggregated lead counts per WT.mc_id (counts only; never the raw CRM export).
+# The file is local and not in the repo. pathcrawl leads / report join it to
+# links.mc_id.
+leads:
+  files:
+    - path: "data/ups/ups_lead_tags.csv"
+  join:
+    key: "wt_mc_id"
+    fallback: "strip_numeric_suffix"
+  allocation: "even_split_across_source_pages"
+  min_cell: 5
+
 crawl:
   max_depth: 8
   max_pages: 5000   # pages per run; raise with --max-pages for a bigger map

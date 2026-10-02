@@ -306,6 +306,12 @@ def report(
     r.close()
     _extract_entities(run, r.config.client.slug, taxonomy)
     r = _open(run, config)
+    if r.config.leads.files:
+        missing = [f.path for f in r.config.leads.files if not Path(f.path).exists()]
+        if missing:
+            err_console.print(f"[yellow]Lead file(s) not found, lead join skipped: {escape(', '.join(missing))}[/]")
+        else:
+            _run_leads(r)
     paths = write_report(r)
     console.print(f"[bold]{escape(headline(r.analyze(), r.config.win.name))}[/]")
     r.close()
@@ -469,3 +475,43 @@ def backfill_links_cmd(
                       "normalize the same (e.g. a stripped tracking param). Not merged; re-crawl to merge:[/]")
         for group in s.duplicate_pages[:20]:
             console.print("  " + escape(" = ".join(group)), highlight=False, soft_wrap=True)
+
+
+@app.command()
+def leads(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
+    """Join aggregated lead counts per campaign tag (leads.files) to the links carrying each tag."""
+    r = _open(run, config)
+    if not r.config.leads.files:
+        err_console.print("[bold red]leads:[/] no leads.files in the config; pass --config configs/<client>.yaml")
+        r.close()
+        raise typer.Exit(code=2)
+    try:
+        _run_leads(r)
+    finally:
+        r.close()
+
+
+def _run_leads(r) -> None:
+    from pathcrawl.leads import LeadFileError, run_leads
+
+    if not r.store.db.execute("SELECT 1 FROM links WHERE mc_id IS NOT NULL LIMIT 1").fetchone():
+        err_console.print("[yellow]No link in this run carries a tag yet. Run pathcrawl backfill-links first "
+                          "(or set scope.capture_params before crawling).[/]")
+    try:
+        result, out = run_leads(r.store, r.config, r.dir)
+    except LeadFileError as e:
+        err_console.print(f"[bold red]leads:[/] {escape(str(e))}", highlight=False)
+        raise typer.Exit(code=1) from None
+    matched = [t for t in result.tags if t.join]
+    total = sum(t.leads for t in result.lead_tags.values())
+    covered = sum(t.leads for t in matched)
+    pages = {row.src for row in result.rows}
+    console.print(
+        f"Leads: {len(result.lead_tags)} tags, {len(matched)} joined to crawled links "
+        f"({sum(1 for t in matched if t.join == 'exact')} exact), covering {covered:g} of {total:g} leads; "
+        f"{len(pages)} pages carry allocated leads. Wrote {escape(str(out))}",
+        highlight=False, soft_wrap=True,
+    )

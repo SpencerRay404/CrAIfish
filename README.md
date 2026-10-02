@@ -285,6 +285,45 @@ site itself, backed by this crawl's numbers:
 - declared page metadata (industry, journey stage, persona) to replace
   inferred tags.
 
+## Lead evidence
+
+With campaign tags kept on links (`scope.capture_params`, above), aggregated
+lead counts per tag can be joined to the pages that carry each tag:
+
+```bash
+pathcrawl backfill-links --run <run dir>                      # older runs only: fill links.mc_id
+pathcrawl leads  --run <run dir> --config configs/ups.yaml    # join; also runs inside `report`
+pathcrawl report --run <run dir> --config configs/ups.yaml
+```
+
+The input is a CSV of **counts per tag only** (`leads.files`). The columns
+are `wt_mc_id`, `leads_most_recent_tag`, `leads_source_initiative_tag`,
+`paid_click_leads` and `main_conversion_page`. The loader refuses any file
+that looks like a raw CRM export, meaning a visitor-token, e-mail or lead-ID
+column, or `token:` values. `.gitignore` excludes `data/**/raw*` and
+`*MKT_TRK*`.
+
+- **Join.** Each lead tag is matched case-sensitively against `links.mc_id`.
+  With `join.fallback: strip_numeric_suffix`, a tag with no exact match is
+  tried again with a trailing `_NNNNN` (5 to 7 digits) removed on both sides.
+- **Allocation.** A tag's leads are split evenly over the distinct pages
+  whose links carry it: `exact` when one page carries the tag, `shared`
+  otherwise. Rows go to the `lead_attribution` table and
+  `<client>_lead_attribution.csv`.
+- **Graph and JSON.** Nodes get `leads_origin` (allocated leads),
+  `leads_exact`, and `leads_landed` (leads whose main conversion page is
+  that page). Edges from a tagged page to its link target get `leads`.
+- **Report section "Lead evidence"** lists:
+  - the top pages carrying leads, and exact versus shared;
+  - tags whose leads converted somewhere other than where the link points;
+  - tags with leads that no crawled link carries;
+  - crawled pages that link to the form without a tag;
+  - tags on form links with no leads;
+  - the paid-click share.
+
+  Tags under `leads.min_cell` leads (default 5) are rolled into one
+  "(other, <5 leads)" line. Full detail stays in the run folder's CSV.
+
 ## Test gates
 
 Each build step has to pass these before it merges. You can run all of them

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,6 +31,7 @@ from pathcrawl.coverage import (
     write_page_entities_csv,
 )
 from pathcrawl.graph import ALL_LINKS, CONTENT_ONLY, MODES, Analysis, distances_to_win, edge_counts, mode_view
+from pathcrawl.leads import lead_annotations, lead_section
 
 DEFINITIONS = {
     "click": "Following one link. A path of N clicks visits N+1 pages.",
@@ -274,7 +276,36 @@ ROLE_COLORS = {
 TOP_HUBS = 10
 
 
-def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, seed: int = 42) -> nx.DiGraph:
+@dataclass
+class Annotations:
+    """Extra node and edge attributes (lead counts, dead pages, health) carried
+    into the GEXF files and report.json. Every node or edge gets each attribute,
+    using the default where nothing was recorded, so Gephi sees one type per column."""
+
+    node_defaults: dict[str, object] = field(default_factory=dict)
+    nodes: dict[str, dict[str, object]] = field(default_factory=dict)
+    edge_defaults: dict[str, object] = field(default_factory=dict)
+    edges: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
+
+    def add_nodes(self, defaults: dict[str, object], values: dict[str, dict[str, object]]) -> None:
+        self.node_defaults.update(defaults)
+        for n, d in values.items():
+            self.nodes.setdefault(n, {}).update(d)
+
+    def add_edges(self, defaults: dict[str, object], values: dict[tuple[str, str], dict[str, object]]) -> None:
+        self.edge_defaults.update(defaults)
+        for e, d in values.items():
+            self.edges.setdefault(e, {}).update(d)
+
+    def node(self, n: str) -> dict[str, object]:
+        return {**self.node_defaults, **self.nodes.get(n, {})}
+
+    def edge(self, u: str, v: str) -> dict[str, object]:
+        return {**self.edge_defaults, **self.edges.get((u, v), {})}
+
+
+def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, seed: int = 42,
+               annotations: Annotations | None = None) -> nx.DiGraph:
     """A copy of the graph laid out for Gephi.
 
     Positions come from a weighted spring layout (content links pull harder
@@ -297,6 +328,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             content_link=content,
             operator=bool(d["operator"]),
             weight=1.0 if content or d["operator"] else 0.2,
+            **(annotations.edge(u, v) if annotations else {}),
         )
     keep = set(out) if content_only else set(g)
     keep |= {n for n in g if n in entry_urls or g.nodes[n]["win"]}
@@ -329,6 +361,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             section=c.section if c else "",
             page_type=c.page_type if c else "",
             status=g.nodes[n].get("status") or "",
+            **(annotations.node(n) if annotations else {}),
             viz={
                 "color": {"r": red, "g": green, "b": blue, "a": 1.0},
                 "size": round(4 + 36 * (indeg[n] / max_in) ** 0.5, 2),
@@ -645,15 +678,26 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     entity_rows = store.page_entities()
     if entity_rows:
         extra += entity_sections(run, entity_rows, categories, report, paths, out, short)
+    annotations = Annotations()
+    lead_nodes, lead_edges = lead_annotations(store, run.graph)
+    if lead_nodes or store.meta("leads"):
+        annotations.add_nodes({"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0}, lead_nodes)
+        annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
+        extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
+        report["leads"] = {k: v for k, v in (store.meta("leads") or {}).items() if k not in ("tags", "conversion_pages")}
     findings = site_findings(store, categories, [w["url"] for w in report["win_pages"]],
                              [m["url"] for m in report["win_near_misses"]], entity_rows)
     report["site_findings"] = findings
     extra += recommendations_markdown(findings, run.config.win.name)
+    if annotations.node_defaults:
+        report["nodes"] = {n: annotations.node(n) for n in sorted(run.graph)}
+    if annotations.edge_defaults:
+        report["edges"] = [{"src": u, "dst": v, **d} for (u, v), d in sorted(annotations.edges.items())]
     paths["report.json"].write_text(json.dumps(report, indent=2, default=lambda v: list(v)), encoding="utf-8")
     paths["report.md"].write_text(markdown_report(run, analysis, summary, mermaid, short, extra), encoding="utf-8")
     paths["paths.mmd"].write_text(mermaid, encoding="utf-8")
     nx.write_graphml(graphml_graph(run.graph, categories), paths["graph.graphml"])
     write_csv(categories, paths["categories.csv"])
     for name, content_only in (("graph.gexf", False), ("graph_content_only.gexf", True)):
-        nx.write_gexf(gexf_graph(run.graph, run.entries, categories, content_only), paths[name])
+        nx.write_gexf(gexf_graph(run.graph, run.entries, categories, content_only, annotations=annotations), paths[name])
     return paths

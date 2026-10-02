@@ -14,6 +14,7 @@ Tables:
 - ``links``: every outbound link found on a page, in scope or not.
 - ``operator_actions``: every decision the operator made, for the audit trail.
 - ``page_entities``: the taxonomy entities each page mentions (``pathcrawl.entities``).
+- ``lead_attribution``: lead counts per tag allocated to the pages carrying it (``pathcrawl.leads``).
 """
 
 from __future__ import annotations
@@ -85,6 +86,18 @@ CREATE TABLE IF NOT EXISTS operator_actions (
     problem TEXT,
     action TEXT NOT NULL,
     detail TEXT
+);
+CREATE TABLE IF NOT EXISTS lead_attribution (
+    src TEXT NOT NULL,                -- the page whose links carry the tag
+    mc_id TEXT NOT NULL,              -- the link tag(s) joined
+    lead_tag TEXT NOT NULL,           -- the tag as it appears in the lead file
+    join_type TEXT NOT NULL,          -- exact or fallback
+    targets TEXT,                     -- space-separated link targets
+    region TEXT,                      -- comma-separated link regions
+    tag_leads_total REAL NOT NULL,
+    tag_source_pages INTEGER NOT NULL,
+    leads_allocated REAL NOT NULL,
+    attribution TEXT NOT NULL         -- exact (one source page) or shared
 );
 CREATE TABLE IF NOT EXISTS page_entities (
     url TEXT NOT NULL,
@@ -330,4 +343,21 @@ class Store:
     def page_entities(self) -> list[sqlite3.Row]:
         return self.db.execute(
             "SELECT url, entity_type, entity, score, evidence FROM page_entities ORDER BY url, entity_type, entity"
+        ).fetchall()
+
+    # ------------------------------------------------------------------ leads
+
+    def replace_lead_attribution(self, rows) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM lead_attribution")
+            self.db.executemany(
+                """INSERT INTO lead_attribution(src, mc_id, lead_tag, join_type, targets, region, tag_leads_total,
+                   tag_source_pages, leads_allocated, attribution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(r.src, r.mc_id, r.lead_tag, r.join, r.targets, r.region, r.tag_leads_total, r.tag_source_pages,
+                  r.leads_allocated, r.attribution) for r in rows],
+            )
+
+    def lead_attribution(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM lead_attribution ORDER BY leads_allocated DESC, src, mc_id"
         ).fetchall()

@@ -9,3 +9,9 @@ venv/
 
 # Crawl output (reports, screenshots, SQLite) is per-run and never committed.
 runs/
+
+# Lead data: only aggregated per-tag counts may be used. Never commit a raw
+# CRM export or anything holding visitor tokens.
+data/**/raw*
+*MKT_TRK*
+*mkt_trk*

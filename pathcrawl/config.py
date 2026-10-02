@@ -223,12 +223,55 @@ class CrawlConfig(_Strict):
     screenshot: bool = True
 
 
+class LeadFile(_Strict):
+    path: str = Field(min_length=1)  # relative to the directory pathcrawl runs in
+
+
+class LeadJoin(_Strict):
+    key: str = "wt_mc_id"  # matched case-sensitively against links.mc_id
+    # strip_numeric_suffix: a lead tag with no exact match is also tried with a
+    # trailing _NNNNN (5-7 digits) removed on both sides; none: exact only.
+    fallback: str | None = "strip_numeric_suffix"
+
+    @field_validator("key")
+    @classmethod
+    def _key(cls, v: str) -> str:
+        if v != "wt_mc_id":
+            raise ValueError("only 'wt_mc_id' is supported as the join key")
+        return v
+
+    @field_validator("fallback")
+    @classmethod
+    def _fallback(cls, v: str | None) -> str | None:
+        if v not in (None, "none", "strip_numeric_suffix"):
+            raise ValueError("fallback must be strip_numeric_suffix or none")
+        return None if v == "none" else v
+
+
+class LeadsConfig(_Strict):
+    """Aggregated lead counts per campaign tag, joined to links.mc_id (pathcrawl leads)."""
+
+    files: list[LeadFile] = []
+    join: LeadJoin = LeadJoin()
+    allocation: str = "even_split_across_source_pages"
+    # report.md rolls tags with fewer leads than this into one line
+    min_cell: int = Field(5, ge=1)
+
+    @field_validator("allocation")
+    @classmethod
+    def _allocation(cls, v: str) -> str:
+        if v != "even_split_across_source_pages":
+            raise ValueError("only 'even_split_across_source_pages' is supported")
+        return v
+
+
 class Config(_Strict):
     client: ClientConfig
     scope: ScopeConfig
     win: WinConfig
     campaigns: list[CampaignConfig] = Field(min_length=1)
     crawl: CrawlConfig = CrawlConfig()
+    leads: LeadsConfig = LeadsConfig()
 
     @model_validator(mode="after")
     def _check_campaigns(self) -> Config:

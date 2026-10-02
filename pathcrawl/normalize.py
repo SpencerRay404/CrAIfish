@@ -106,6 +106,31 @@ def captured_param(href: str | None, names: Iterable[str]) -> str | None:
     return None
 
 
+def normalize_conversion_url(url: str | None) -> str | None:
+    """Normalize a conversion-page URL from a CRM or lead export for matching.
+
+    Drops the query and fragment and lowercases host and path (exports spell
+    the same page in different cases). Returns None for empty values, the
+    literal ``null`` and landing-page editor previews (``lpeditor``,
+    ``devicePreview``). A missing scheme is taken as https.
+    """
+    url = (url or "").strip()
+    if not url or url.lower() in ("null", "none", "nan"):
+        return None
+    if "://" not in url:
+        url = "https://" + url.lstrip("/")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").rstrip(".").lower()
+    path = (parts.path or "/").lower()
+    if not host or "lpeditor" in path or "devicepreview" in path:
+        return None
+    scheme = parts.scheme.lower() if parts.scheme.lower() in CRAWLABLE_SCHEMES else "https"
+    return urlunsplit((scheme, host, path, "", ""))
+
+
 def host_of(url: str) -> str:
     """Lowercased host of ``url`` (empty string if there is none)."""
     try:
