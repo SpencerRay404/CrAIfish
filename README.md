@@ -320,6 +320,27 @@ crawl --resume <run dir>` to crawl the new entry links. Add `--max-pages` if
 the run stopped at its page budget. The report gets an "External entry
 points" section.
 
+## Dead pages
+
+A loaded page is **dead** if it answers HTTP 404 or 410, or is a soft 404
+served with HTTP 200. A soft 404 is a title starting with `404` or containing
+"Page Not Found", or body text saying "this page no longer exists". The
+crawler records `pages.is_dead` and `dead_reason`, and `pathcrawl
+backfill-links` fills them for older runs.
+
+The report's **Dead pages** section lists:
+- each dead page and why it counts as dead;
+- the pages still linking to it;
+- how many of those links are in the body, how many are in the nav, header
+  or footer, and how many come from external posts;
+- any campaign tag riding on those links.
+
+`<client>_dead_pages.csv` has one row per link into a dead page. In
+`graph.gexf` and `report.json`, nodes carry `is_dead`,
+`inbound_dead_links`, `dead_inbound_pages` and `dead_inbound_body_links`,
+and edges carry `to_dead`. A post's landing page that is dead keeps its edge
+(flagged `to_dead`) and is never made an entry link.
+
 ## Lead evidence
 
 With campaign tags kept on links (`scope.capture_params`, above), aggregated

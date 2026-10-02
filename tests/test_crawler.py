@@ -341,6 +341,19 @@ def test_external_seed_landing_pages_are_crawled_as_entries(make_site, tmp_path)
     assert "linkedin" not in " ".join(site.requests)
 
 
+def test_dead_pages_are_recorded(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html('<a href="/soft.html">s</a><a href="/hard.html">h</a>')),
+        "/soft.html": (200, {}, html("<p>Sorry, this page no longer exists.</p>")),
+        "/hard.html": (404, {}, html("<p>missing</p>")),
+    })
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    assert (page_row(c, site.base + "/soft.html")["is_dead"], page_row(c, site.base + "/soft.html")["dead_reason"]) == \
+        (1, "page says 'this page no longer exists'")
+    assert page_row(c, site.base + "/hard.html")["dead_reason"] == "HTTP 404"
+    assert page_row(c, site.base + "/start.html")["is_dead"] == 0
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)

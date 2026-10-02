@@ -32,7 +32,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 from pathcrawl.config import CampaignConfig, Config
-from pathcrawl.extract import detect_block, extract_links, extract_page, visible_text
+from pathcrawl.extract import detect_block, detect_dead, extract_links, extract_page, visible_text
 from pathcrawl.store import LinkRecord, PageRecord, Store
 
 # --------------------------------------------------------------------------- operator
@@ -632,6 +632,7 @@ class Crawler:
             win, win_source = True, "operator"
         raw_len = self._raw_text_len(final)
         rendered_len = len(data.text)
+        dead_reason = detect_dead(visit.http_status, data.title, data.text)
         return PageRecord(
             url=final,
             requested_url=url,
@@ -655,6 +656,8 @@ class Crawler:
             screenshot=self._screenshot(page, final),
             win=win,
             win_source=win_source,
+            dead_reason=dead_reason,
+            is_dead=dead_reason is not None,
         )
 
     def _follow_operator_url(self, src: str, depth: int, decision: Decision) -> None:

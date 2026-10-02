@@ -120,11 +120,13 @@ def read_rows(path: Path) -> list[dict[str, str]]:
                 for r in reader]
 
 
-def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list[str], win=None) -> SeedIngest:
+def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list[str], win=None,
+         dead: set[str] = frozenset()) -> SeedIngest:
     """Dedupe the rows and decide what each becomes (no database writes).
 
     A landing page that is a win keeps its edge but is not made an entry link:
-    the journey is already complete there."""
+    the journey is already complete there. Nor is a landing page known to be
+    dead; its edge is kept and reported (to_dead)."""
     known = {normalize_seed_url(u) for u in ad_urls} | {normalize_seed_url(u) for u in entry_urls}
     entries = {scope.normalize(u) for u in entry_urls}
     seeds: dict[str, Seed] = {}
@@ -166,7 +168,8 @@ def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list
                 seeds[link.target] = Seed(link.target, "", post_date_derived(link.resolved or link.raw))
 
     landing = sorted({lk.target for s in seeds.values() for lk in s.links
-                      if lk.kind == "page" and not (win is not None and win.url_matches(lk.target))})
+                      if lk.kind == "page" and lk.target not in dead
+                      and not (win is not None and win.url_matches(lk.target))})
     return SeedIngest(
         seeds=list(seeds.values()),
         skipped_seeds=skipped,
@@ -181,7 +184,8 @@ def ingest(store, config, campaign, path: Path) -> SeedIngest:
     from pathcrawl.store import LinkRecord, PageRecord
 
     entry_urls = [e["requested_url"] for e in store.entries()] or [e.url for e in campaign.entry_links]
-    result = plan(read_rows(path), config.scope, campaign.ad_urls, entry_urls, config.win)
+    dead = {r["url"] for r in store.db.execute("SELECT url FROM pages WHERE is_dead = 1")}
+    result = plan(read_rows(path), config.scope, campaign.ad_urls, entry_urls, config.win, dead)
     channel = campaign.platform
     for s in result.seeds:
         links = [

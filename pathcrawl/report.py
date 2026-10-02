@@ -31,6 +31,8 @@ from pathcrawl.coverage import (
     write_page_entities_csv,
 )
 from pathcrawl.graph import ALL_LINKS, CONTENT_ONLY, MODES, Analysis, distances_to_win, edge_counts, mode_view
+from pathcrawl.dead import dead_annotations, dead_links, dead_pages, dead_section
+from pathcrawl.dead import write_csv as write_dead_csv
 from pathcrawl.leads import lead_annotations, lead_section
 
 DEFINITIONS = {
@@ -564,6 +566,8 @@ def external_seed_rows(run) -> list[dict]:
             "links": [{
                 "target": lk["url"], "mc_id": lk["mc_id"], "in_scope": bool(lk["in_scope"]),
                 "target_is_win": bool(lk["url"] in g and g.nodes[lk["url"]]["win"]),
+                "dead": bool(store.db.execute("SELECT 1 FROM pages WHERE url = ? AND is_dead = 1",
+                                              (store.resolve(lk["url"]) if lk["url"] else "",)).fetchone()),
                 "target_status": g.nodes[lk["url"]].get("status") if lk["url"] in g else None,
             } for lk in links],
         })
@@ -586,7 +590,8 @@ def external_seed_section(run, short) -> list[str]:
         if not r["links"]:
             L.append(f"| {title} | {r['post_date_derived'] or '-'} | (no landing page) | - |")
         for lk in r["links"]:
-            note = " (win)" if lk["target_is_win"] else "" if lk["in_scope"] else " (outside the crawl)"
+            note = (" (win)" if lk["target_is_win"] else " (dead page)" if lk["dead"]
+                    else "" if lk["in_scope"] else " (outside the crawl)")
             L.append(f"| {title} | {r['post_date_derived'] or '-'} | {short(lk['target']) if lk['target'] else '-'}{note} "
                      f"| {lk['mc_id'] or '-'} |")
     L.append("")
@@ -739,6 +744,14 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
         annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
         extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
         report["leads"] = {k: v for k, v in (store.meta("leads") or {}).items() if k not in ("tags", "conversion_pages")}
+    dead_nodes, dead_edges = dead_annotations(store)
+    annotations.add_nodes({"is_dead": False, "dead_reason": "", "inbound_dead_links": 0, "dead_inbound_pages": 0,
+                           "dead_inbound_body_links": 0}, dead_nodes)
+    annotations.add_edges({"to_dead": False}, dead_edges)
+    extra += dead_section(store, short)
+    paths[f"{run.config.client.slug}_dead_pages.csv"] = out / f"{run.config.client.slug}_dead_pages.csv"
+    write_dead_csv(dead_links(store), dead_pages(store), paths[f"{run.config.client.slug}_dead_pages.csv"])
+    report["dead_pages"] = {"count": len(dead_nodes), "pages": dead_nodes}
     if store.meta("external_seeds"):
         extra += external_seed_section(run, short)
         report["external_seeds"] = external_seed_rows(run)

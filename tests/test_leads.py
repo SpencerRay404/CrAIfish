@@ -210,7 +210,8 @@ def test_leads_cli_and_report(tmp_path, lead_file):
 
     data = json.loads((run / "report.json").read_text())
     assert data["nodes"][B + "retail"]["leads_origin"] == 12 and data["nodes"][B + "retail"]["leads_exact"] == 12
-    assert data["nodes"][B + "auto"] == {"leads_origin": 13.0, "leads_exact": 8.0, "leads_landed": 0.0}
+    auto = data["nodes"][B + "auto"]
+    assert (auto["leads_origin"], auto["leads_exact"], auto["leads_landed"]) == (13.0, 8.0, 0.0)
     assert data["nodes"][WIN]["leads_landed"] == 30  # 12 + 10 + 8 converted on v4
     assert {"src": B + "whole", "dst": WIN, "leads": 5.0} in data["edges"]
     assert data["leads"]["leads_total"] == 38 and "tags" not in data["leads"]

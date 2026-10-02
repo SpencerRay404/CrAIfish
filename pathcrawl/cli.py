@@ -453,7 +453,7 @@ def backfill_links_cmd(
         help="Client config for capture_params (default: the run's copy, else configs/<client>.yaml).",
     ),
 ) -> None:
-    """Fill columns added since a run was crawled (link campaign tags), from its crawl.db. Fetches nothing."""
+    """Fill columns added since a run was crawled (link campaign tags, dead pages), from its crawl.db. Fetches nothing."""
     from pathcrawl.backfill import backfill_links
 
     r = _open(run, config)
@@ -469,7 +469,8 @@ def backfill_links_cmd(
     s = backfill_links(r.store, r.config.scope)
     r.close()
     console.print(f"Links: {s.links_tagged} of {s.links} carry a tag ({', '.join(r.config.scope.capture_params) or '-'}); "
-                  f"{s.distinct_tags} distinct tags on {s.source_pages} source pages.", highlight=False, soft_wrap=True)
+                  f"{s.distinct_tags} distinct tags on {s.source_pages} source pages. Dead pages: {s.dead_pages}.",
+                  highlight=False, soft_wrap=True)
     if s.duplicate_pages:
         console.print(f"[yellow]{len(s.duplicate_pages)} pages were stored under more than one URL that now "
                       "normalize the same (e.g. a stripped tracking param). Not merged; re-crawl to merge:[/]")

@@ -6,6 +6,8 @@ No pages are fetched. ``pathcrawl backfill-links --run DIR`` runs every step:
   ``WT.mc_id``) parsed from each link's raw ``href``.
 - A check for pages stored twice under URLs that differ only by params the
   current config strips (e.g. ``?msockid=...``). They are reported, not merged.
+- ``pages.is_dead`` / ``dead_reason``: 404, 410 and soft 404s, from the stored
+  status, title and text (``pathcrawl.dead.backfill_dead``).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ class LinkBackfill:
     distinct_tags: int = 0
     source_pages: int = 0
     duplicate_pages: list[list[str]] = field(default_factory=list)
+    dead_pages: int = 0
 
 
 def backfill_links(store, scope) -> LinkBackfill:
@@ -37,6 +40,9 @@ def backfill_links(store, scope) -> LinkBackfill:
     ).fetchone()
     out.links_tagged, out.distinct_tags, out.source_pages = stats[0], stats[1], stats[2]
     out.duplicate_pages = duplicate_pages(store, scope)
+    from pathcrawl.dead import backfill_dead
+
+    out.dead_pages = backfill_dead(store)
     return out
 
 

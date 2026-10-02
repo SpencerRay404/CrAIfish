@@ -231,3 +231,30 @@ def detect_block(http_status: int | None, title: str | None, text: str) -> str |
         if phrase in haystack and len(text) < 3000:
             return f"page says {phrase!r}"
     return None
+
+
+DEAD_STATUSES = (404, 410)
+DEAD_TITLE_PHRASES = ("page not found",)
+DEAD_TEXT_PHRASES = ("this page no longer exists",)
+
+
+def detect_dead(http_status: int | None, title: str | None, text: str | None) -> str | None:
+    """Why a page counts as gone, or None if it doesn't.
+
+    HTTP 404 or 410; or a "soft 404" served with HTTP 200: a title starting
+    with 404 or containing "Page Not Found", or body text saying the page no
+    longer exists.
+    """
+    if http_status in DEAD_STATUSES:
+        return f"HTTP {http_status}"
+    t = (title or "").strip().lower()
+    if t.startswith("404"):
+        return "title starts with 404"
+    for phrase in DEAD_TITLE_PHRASES:
+        if phrase in t:
+            return f"title says {phrase!r}"
+    body = (text or "").lower()
+    for phrase in DEAD_TEXT_PHRASES:
+        if phrase in body:
+            return f"page says {phrase!r}"
+    return None

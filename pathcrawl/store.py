@@ -115,6 +115,8 @@ MIGRATIONS = [
     ("links", "mc_id", "TEXT"),
     ("pages", "channel", "TEXT"),             # external seeds: e.g. linkedin
     ("pages", "post_date_derived", "TEXT"),   # external seeds: date from the post ID
+    ("pages", "is_dead", "INTEGER"),          # 404/410 or a soft 404 (pathcrawl.extract.detect_dead)
+    ("pages", "dead_reason", "TEXT"),
 ]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
@@ -148,6 +150,8 @@ class PageRecord:
     win: bool = False
     win_source: str | None = None
     error: str | None = None
+    is_dead: bool | None = None
+    dead_reason: str | None = None
 
 
 @dataclass
@@ -265,8 +269,8 @@ class Store:
                 """INSERT OR REPLACE INTO pages(url, requested_url, status, depth, http_status, load_ms,
                    redirect_chain, canonical, title, meta_description, headings, body_text, form_present,
                    jsonld_types, raw_text_len, rendered_text_len, js_dependent, screenshot, win, win_source,
-                   error, crawled_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   error, crawled_at, is_dead, dead_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     page.url, page.requested_url, page.status, page.depth, page.http_status, page.load_ms,
                     json.dumps(page.redirect_chain), page.canonical, page.title, page.meta_description,
@@ -276,6 +280,7 @@ class Store:
                     page.raw_text_len, page.rendered_text_len,
                     None if page.js_dependent is None else int(page.js_dependent),
                     page.screenshot, int(page.win), page.win_source, page.error, now(),
+                    None if page.is_dead is None else int(page.is_dead), page.dead_reason,
                 ),
             )
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))
