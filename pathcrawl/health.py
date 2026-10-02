@@ -232,12 +232,13 @@ def _sitemap_urls(fetch: Fetch, start: list[str], errors: list[str]) -> tuple[se
         seen.add(sm)
         status, body = fetch(sm)
         if status != 200 or not body:
-            errors.append(f"{sm}: HTTP {status}")
+            errors.append(f"{sm}: " + (f"HTTP {status}" if status else "no response") + (" (empty)" if status == 200 else ""))
             continue
         try:
             root = ElementTree.fromstring(_text(body).encode())
         except ElementTree.ParseError:
-            errors.append(f"{sm}: not XML")
+            head = _text(body)[:200].lower()
+            errors.append(f"{sm}: not XML" + (" (an HTML page, maybe a bot check)" if "<html" in head else ""))
             continue
         tag = root.tag.rsplit("}", 1)[-1]
         locs = [el.text.strip() for el in root.iter() if el.tag.rsplit("}", 1)[-1] == "loc" and el.text]

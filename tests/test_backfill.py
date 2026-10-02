@@ -83,10 +83,13 @@ def test_old_database_is_migrated_and_backfilled(tmp_path):
     assert (out.links, out.links_tagged, out.distinct_tags, out.source_pages) == (5, 3, 2, 2)
     tags = [r["mc_id"] for r in s.db.execute("SELECT mc_id FROM links ORDER BY id")]
     assert tags == ["TAG_1", "TAG_2", "TAG_1", None, None]
-    # the page crawled once with ?msockid= is found as a duplicate of the clean URL
+    # the page crawled once with ?msockid= is merged into the clean URL
     assert out.duplicate_pages == [[B + "c", B + "c?msockid=123"]]
+    assert [r["url"] for r in s.db.execute("SELECT url FROM pages ORDER BY url")] == [B + "a", B + "b", B + "c"]
+    assert s.resolve(B + "c?msockid=123") == B + "c"
     # running it again changes nothing
-    assert backfill_links(s, config().scope).links_tagged == 3
+    again = backfill_links(s, config().scope)
+    assert again.links_tagged == 3 and again.duplicate_pages == []
     s.close()
 
 
@@ -100,7 +103,7 @@ def test_backfill_cli_uses_the_live_config_when_the_run_copy_has_no_capture_para
     assert result.exit_code == 0, result.output
     assert "configs/xco.yaml" in result.output
     assert "3 of 5 carry a tag" in result.output and "2 distinct tags on 2 source pages" in result.output
-    assert "more than one URL" in result.output
+    assert "Merged 1 pages that were stored under more than one URL and renamed 0" in result.output
 
 
 def test_new_links_store_the_tag(tmp_path):
@@ -123,3 +126,32 @@ def test_ups_config_captures_mc_id_and_strips_source_params():
     base = "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions"
     for param in ("msockid=abc", "_gl=1*x", "gbraid=g", "wbraid=w", "WT.mc_id=T"):
         assert c.scope.normalize(f"{base}?{param}") == base
+
+
+def test_duplicate_pages_are_merged(tmp_path):
+    from pathcrawl.store import LinkRecord, PageRecord
+
+    s = Store(tmp_path / "crawl.db")
+    clean, dup = B + "retail", B + "retail?msockid=abc"
+    s.add_entry(0, "retail", dup, dup)
+    s.save_page(PageRecord(url=clean, status="ok"), [
+        LinkRecord("/talk?WT.mc_id=T1", B + "talk", "Talk", "body", True),
+        LinkRecord("/a", B + "a", "a", "nav", True),
+    ])
+    s.save_page(PageRecord(url=dup, status="ok"), [
+        LinkRecord("/talk?WT.mc_id=T2", B + "talk", "Talk", "body", True),  # only on the msockid copy
+        LinkRecord("/a", B + "a", "a", "nav", True),                        # on both: kept once
+    ])
+    s.save_page(PageRecord(url=B + "other", status="ok"), [LinkRecord("x", dup, "r", "body", True)])
+    # a page known only under its msockid spelling is renamed
+    s.save_page(PageRecord(url=B + "solo?msockid=1", status="ok"), [LinkRecord("/a", B + "a", "a", "body", True)])
+    out = backfill_links(s, config().scope)
+    assert sorted(out.duplicate_pages) == [[clean, dup], [B + "solo?msockid=1"]]
+    assert s.has_page(B + "solo") and s.resolve(B + "solo?msockid=1") == B + "solo"  # renamed
+    rows = [(r["src"], r["href"], r["mc_id"]) for r in s.db.execute("SELECT * FROM links WHERE src = ? ORDER BY id", (clean,))]
+    assert rows == [(clean, "/talk?WT.mc_id=T1", "T1"), (clean, "/a", None), (clean, "/talk?WT.mc_id=T2", "T2")]
+    assert [r["url"] for r in s.db.execute("SELECT url FROM links WHERE src = ?", (B + "other",))] == [clean]
+    assert [e["node_url"] for e in s.entries()] == [clean]
+    assert s.resolve(dup) == clean
+    assert not s.has_page(dup)
+    s.close()

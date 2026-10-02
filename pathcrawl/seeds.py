@@ -36,6 +36,15 @@ EXTERNAL = "external"
 ACTIVITY_ID = re.compile(r"activity[-:](\d{19})")
 POST_HOSTS = ("linkedin.com",)
 COLUMNS = ("seed_url", "post_title", "outbound_url_raw", "anchor_text", "link_order", "outbound_resolved_url")
+# Other names accepted for a column (header text lowercased, spaces as underscores).
+COLUMN_ALIASES = {
+    "outbound_resolved_url": ("resolved_url", "outbound_url_resolved", "landing_url", "landing_page",
+                              "landing_page_url", "final_url", "destination_url", "resolved"),
+    "outbound_url_raw": ("outbound_url", "link_url", "raw_url", "short_link", "post_link"),
+    "seed_url": ("post_url", "linkedin_url", "seed"),
+    "post_title": ("title", "headline"),
+}
+SHORTENER_HOSTS = ("lnkd.in", "spr.ly", "bit.ly", "ow.ly", "t.co", "buff.ly", "tinyurl.com")
 
 
 class SeedFileError(Exception):
@@ -104,20 +113,42 @@ class SeedIngest:
     duplicate_rows: int
     new_entries: list[str]  # landing pages added as entry links
     existing_entries: list[str]  # landing pages that already were entry links
+    # every outbound link that did not become an entry link, and why
+    not_entries: list[tuple[str, str]] = field(default_factory=list)
+    columns_used: dict[str, str] = field(default_factory=dict)
 
 
-def read_rows(path: Path) -> list[dict[str, str]]:
+class SeedRows(list):
+    """The rows of a seed file, plus which header fed each column."""
+
+    columns: dict[str, str] = {}
+
+
+def read_rows(path: Path) -> SeedRows:
     try:
         f = open(path, newline="", encoding="utf-8-sig")
     except OSError as e:
         raise SeedFileError(f"cannot read seed file {path}: {e}") from None
     with f:
         reader = csv.DictReader(f)
-        header = [(h or "").strip().lower() for h in reader.fieldnames or []]
-        if "seed_url" not in header:
-            raise SeedFileError(f"{path} has no seed_url column")
-        return [{k: ((r.get(orig) or "").strip()) for k, orig in zip(header, reader.fieldnames) if k in COLUMNS}
-                for r in reader]
+        mapping = column_mapping(reader.fieldnames or [])
+        if "seed_url" not in mapping:
+            raise SeedFileError(f"{path} has no seed_url column (found: {', '.join(reader.fieldnames or [])})")
+        rows = SeedRows({col: (r.get(orig) or "").strip() for col, orig in mapping.items()} for r in reader)
+    rows.columns = mapping
+    return rows
+
+
+def column_mapping(fieldnames: list[str]) -> dict[str, str]:
+    """Our column name -> the header in the file, accepting the aliases above."""
+    norm = {re.sub(r"[^a-z0-9]+", "_", (h or "").strip().lower()).strip("_"): h for h in fieldnames}
+    out = {}
+    for col in COLUMNS:
+        for name in (col, *COLUMN_ALIASES.get(col, ())):
+            if name in norm:
+                out[col] = norm[name]
+                break
+    return out
 
 
 def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list[str], win=None,
@@ -131,6 +162,7 @@ def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list
     entries = {scope.normalize(u) for u in entry_urls}
     seeds: dict[str, Seed] = {}
     skipped, dupes, pairs = [], 0, set()
+    columns = getattr(rows, "columns", {})
     for r in rows:
         seed = normalize_seed_url(r.get("seed_url"))
         if not seed:
@@ -167,16 +199,44 @@ def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list
             if link.kind == "seed" and link.target not in seeds and link.target not in known:
                 seeds[link.target] = Seed(link.target, "", post_date_derived(link.resolved or link.raw))
 
-    landing = sorted({lk.target for s in seeds.values() for lk in s.links
-                      if lk.kind == "page" and lk.target not in dead
-                      and not (win is not None and win.url_matches(lk.target))})
+    landing, not_entries = set(), {}
+    for s in seeds.values():
+        for lk in s.links:
+            target = lk.target or lk.raw or ""
+            if lk.kind == "none":
+                not_entries[f"{s.url} (no link)"] = "no landing page in the row"
+            elif lk.kind == "seed":
+                not_entries[target] = "another post (added as a seed)"
+            elif lk.kind == "offsite":
+                not_entries[target] = _offsite_reason(lk, scope)
+            elif lk.target in dead:
+                not_entries[target] = "dead page"
+            elif win is not None and win.url_matches(lk.target):
+                not_entries[target] = "win page"
+            else:
+                landing.add(lk.target)
+    landing = sorted(landing)
     return SeedIngest(
         seeds=list(seeds.values()),
         skipped_seeds=skipped,
         duplicate_rows=dupes,
         new_entries=[u for u in landing if u not in entries],
         existing_entries=[u for u in landing if u in entries],
+        not_entries=sorted(not_entries.items()),
+        columns_used=dict(columns),
     )
+
+
+def _offsite_reason(lk: SeedLink, scope) -> str:
+    url = lk.target or lk.raw or ""
+    host = urlsplit(url).hostname or ""
+    if host in SHORTENER_HOSTS and not lk.resolved:
+        return f"short link not resolved (outbound_resolved_url is empty; {host} is not on an allowed domain)"
+    if not scope.domain_allowed(url):
+        return f"host {host or '?'} is not in scope.allowed_domains"
+    if not scope.locale_allowed(url):
+        return "excluded by the locale filters"
+    return "not in scope"
 
 
 def ingest(store, config, campaign, path: Path) -> SeedIngest:

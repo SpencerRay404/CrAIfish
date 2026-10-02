@@ -401,9 +401,11 @@ pathcrawl report --run <run dir> --config configs/ups.yaml
 
 The input is a CSV of **counts per tag only** (`leads.files`). The columns
 are `wt_mc_id`, `leads_most_recent_tag`, `leads_source_initiative_tag`,
-`paid_click_leads` and `main_conversion_page`. The loader refuses any file
-that looks like a raw CRM export, meaning a visitor-token, e-mail or lead-ID
-column, or `token:` values. `.gitignore` excludes `data/**/raw*` and
+`paid_click_leads` and `main_conversion_page`. Other count columns, such
+as `distinct_visitors`, are fine. The loader refuses any file that looks
+like a raw CRM export: a column that identifies a person or visitor (a token
+or tracking cookie, e-mail, lead, visitor or contact ID, IP address), a
+`token:` value, or an e-mail address. `.gitignore` excludes `data/**/raw*` and
 `*MKT_TRK*`.
 
 - **Join.** Each lead tag is matched case-sensitively against `links.mc_id`.
@@ -486,8 +488,10 @@ the output directory `runs/<slug>/...`.
   link before being stripped, e.g. `["WT.mc_id"]`. The value is stored in
   `links.mc_id` so lead counts can be joined to the link that carried the
   tag. For a run crawled before this existed, `pathcrawl backfill-links --run
-  <run dir>` fills it from the raw hrefs in `crawl.db`, fetching nothing. It
-  also lists pages stored under two URLs that now normalize the same.
+  <run dir>` fills it from the raw hrefs in `crawl.db`, fetching nothing.
+  It also merges pages stored under two URLs that now normalize the same,
+  such as a page crawled once with `?msockid=...`. The tags on both copies'
+  links are kept, and the old spelling becomes an alias.
 - **`region_selectors`** (optional): extra CSS selectors for `nav`,
   `header` and `footer`. Links inside `<nav>`, `<header>` and `<footer>`
   (and the matching ARIA roles) are classified automatically. Add selectors

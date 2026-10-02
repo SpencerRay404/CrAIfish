@@ -472,10 +472,13 @@ def backfill_links_cmd(
                   f"{s.distinct_tags} distinct tags on {s.source_pages} source pages. Dead pages: {s.dead_pages}.",
                   highlight=False, soft_wrap=True)
     if s.duplicate_pages:
-        console.print(f"[yellow]{len(s.duplicate_pages)} pages were stored under more than one URL that now "
-                      "normalize the same (e.g. a stripped tracking param). Not merged; re-crawl to merge:[/]")
+        merged = sum(1 for g in s.duplicate_pages if len(g) > 1)
+        console.print(f"Merged {merged} pages that were stored under more than one URL and renamed "
+                      f"{len(s.duplicate_pages) - merged} (a param now stripped, e.g. msockid); "
+                      f"{s.links_renormalized} link targets rewritten to the clean URL.",
+                      highlight=False, soft_wrap=True)
         for group in s.duplicate_pages[:20]:
-            console.print("  " + escape(" = ".join(group)), highlight=False, soft_wrap=True)
+            console.print("  " + escape(" + ".join(group)), highlight=False, soft_wrap=True)
 
 
 @app.command()
@@ -550,6 +553,18 @@ def external_seeds_cmd(
     console.print(f"{len(result.seeds)} posts added; {len(result.skipped_seeds)} skipped (already ad URLs or entry "
                   f"links), {result.duplicate_rows} duplicate rows. {len(result.new_entries)} new entry links queued, "
                   f"{len(result.existing_entries)} already entry links.", highlight=False, soft_wrap=True)
+    if result.columns_used:
+        console.print("Columns read: " + ", ".join(f"{k} <- {v!r}" for k, v in result.columns_used.items()),
+                      highlight=False, soft_wrap=True)
+    from collections import Counter
+
+    reasons = Counter(reason for _, reason in result.not_entries)
+    if reasons:
+        console.print("Outbound links not made entry links:", highlight=False)
+        for reason, n in reasons.most_common():
+            console.print(f"  {n} × {escape(reason)}", highlight=False, soft_wrap=True)
+        for target, reason in result.not_entries[:30]:
+            console.print(f"    {escape(target)}  ({escape(reason)})", highlight=False, soft_wrap=True)
     if result.new_entries:
         console.print("Crawl the new entry links with:")
         console.print(escape(f"pathcrawl crawl --resume {run}"), soft_wrap=True, highlight=False)
@@ -576,8 +591,17 @@ def site_signals_cmd(
         r.close()
     for host, h in signals.items():
         blocked = [b for b, v in h["ai_crawlers"].items() if not v["allowed_home"]]
-        console.print(f"{escape(host)}: robots.txt {'yes' if h['robots_txt'] else 'no'}, "
-                      f"AI crawlers blocked from home: {len(blocked)}, llms.txt {'yes' if h['llms_txt'] else 'no'}, "
-                      f"sitemap URLs {h['sitemap_urls']}, crawled pages in sitemap "
-                      f"{h['crawled_pages_in_sitemap']}/{h['crawled_pages']}", highlight=False, soft_wrap=True)
+        robots = "yes" if h["robots_txt"] else f"no (HTTP {h['robots_status'] or 'error: no response'})"
+        console.print(f"{escape(host)}: robots.txt {robots}, "
+                      f"AI crawlers blocked from home: {len(blocked)}"
+                      + (f" ({', '.join(blocked)})" if blocked else "")
+                      + f", llms.txt {'yes' if h['llms_txt'] else 'no'}, sitemaps read {h['sitemaps_read']} of "
+                      f"{len(h['sitemaps_declared'])} declared, sitemap URLs {h['sitemap_urls']}, crawled pages in "
+                      f"sitemap {h['crawled_pages_in_sitemap']}/{h['crawled_pages']}", highlight=False, soft_wrap=True)
+        for e in h["errors"][:3]:
+            console.print(f"  [yellow]{escape(e)}[/]", highlight=False, soft_wrap=True)
+    if any(not h["robots_txt"] or h["errors"] for h in signals.values()):
+        console.print("HTTP 403 or no response usually means the site refuses plain HTTP clients. The crawler "
+                      "checks the same files with its browser at the end of a crawl, which may get through.",
+                      highlight=False, soft_wrap=True)
     console.print("Saved; run pathcrawl report to include them.")

@@ -258,7 +258,8 @@ def test_site_signals_cli_against_a_local_server(tmp_path):
         s.close()
         result = CliRunner().invoke(app, ["site-signals", "--run", str(tmp_path)])
         assert result.exit_code == 0, result.output
-        assert "AI crawlers blocked from home: 1, llms.txt yes" in result.output
+        assert "AI crawlers blocked from home: 1 (GPTBot), llms.txt yes" in result.output
+        assert "sitemap.xml: HTTP 404" in result.output  # why the sitemap count is 0
         CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
         md = (tmp_path / "report.md").read_text()
         assert "### Hosts: robots.txt, llms.txt and sitemaps" in md and "(blocked: GPTBot)" in md

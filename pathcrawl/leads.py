@@ -32,7 +32,16 @@ from pathcrawl.normalize import normalize_conversion_url
 
 REQUIRED_COLUMNS = ("wt_mc_id", "leads_most_recent_tag")
 OPTIONAL_COLUMNS = ("leads_source_initiative_tag", "paid_click_leads", "main_conversion_page")
-FORBIDDEN_COLUMN_MARKERS = ("mkt_trk", "token", "email", "lead_id", "leadid", "visitor")
+# Column names that identify a person or visitor (a raw export), as opposed to
+# aggregated counts such as distinct_visitors or leads_most_recent_tag.
+IDENTIFIER_COLUMN = re.compile(
+    r"mkto?_?trk|token|e_?mail|cookie|ip_?address|(?:^|_)(?:lead|visitor|person|contact|user)_?id(?:$|_)"
+)
+EMAIL_VALUE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _identifier_column(name: str) -> bool:
+    return bool(IDENTIFIER_COLUMN.search(re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")))
 NUMERIC_SUFFIX = re.compile(r"_\d{5,7}$")
 OTHER = "(other, <{n} leads)"
 
@@ -78,7 +87,7 @@ def load_lead_tags(paths: list[Path]) -> dict[str, TagLeads]:
             reader = csv.DictReader(f)
             header = [h.strip() for h in reader.fieldnames or []]
             lowered = [h.lower() for h in header]
-            bad = [h for h, low in zip(header, lowered) if any(m in low for m in FORBIDDEN_COLUMN_MARKERS)]
+            bad = [h for h in header if _identifier_column(h)]
             if bad:
                 raise LeadFileError(
                     f"{path} has column(s) {bad} that look like a raw lead export. Only the aggregated "
@@ -92,6 +101,8 @@ def load_lead_tags(paths: list[Path]) -> dict[str, TagLeads]:
                 row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
                 if any(v.lower().startswith("token:") for v in row.values()):
                     raise LeadFileError(f"{path} contains visitor tokens; use the aggregated tag file only")
+                if any(EMAIL_VALUE.match(v) for v in row.values()):
+                    raise LeadFileError(f"{path} contains e-mail addresses; use the aggregated tag file only")
                 tag = row.get("wt_mc_id", "")
                 if not tag:
                     continue

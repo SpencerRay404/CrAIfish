@@ -117,10 +117,27 @@ def test_load_lead_tags(lead_file):
 @pytest.mark.parametrize("header", [
     ["wt_mc_id", "leads_most_recent_tag", "MKT_TRK"],
     ["wt_mc_id", "leads_most_recent_tag", "Email Address"],
+    ["wt_mc_id", "leads_most_recent_tag", "Lead ID"],
+    ["wt_mc_id", "leads_most_recent_tag", "visitorId"],
+    ["wt_mc_id", "leads_most_recent_tag", "_mkto_trk"],
 ])
 def test_raw_exports_are_refused(tmp_path, header):
     path = write_leads(tmp_path / "raw.csv", [("T", 1, "x")], header)
     with pytest.raises(LeadFileError, match="raw lead export"):
+        load_lead_tags([path])
+
+
+def test_aggregated_count_columns_are_accepted(tmp_path):
+    """Counts about visitors are fine; identifiers of visitors are not."""
+    path = write_leads(tmp_path / "agg.csv", [("T", 3, 2, 1, "", 7, 4)],
+                       ["wt_mc_id", "leads_most_recent_tag", "leads_source_initiative_tag", "paid_click_leads",
+                        "main_conversion_page", "distinct_visitors", "visitor_count"])
+    assert load_lead_tags([path])["T"].leads == 3
+
+
+def test_email_values_are_refused(tmp_path):
+    path = write_leads(tmp_path / "e.csv", [("T", 1, 0, 0, "someone@example.com")])
+    with pytest.raises(LeadFileError, match="e-mail"):
         load_lead_tags([path])
 
 

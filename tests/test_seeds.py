@@ -178,3 +178,38 @@ def test_ups_config_points_at_the_scrape_file():
     assert c.campaign("linkedin-articles").external_seeds == "data/ups/linkedin_scrape.csv"
     template = Path(__file__).parent.parent / "data" / "templates" / "linkedin_scrape_template.csv"
     assert template.read_text().startswith("seed_url,post_title,outbound_url_raw,anchor_text,link_order,outbound_resolved_url")
+
+
+def test_column_aliases_and_reasons(tmp_path):
+    """A file whose resolved-URL column has another name still resolves short
+    links; links that are not made entry links say why."""
+    path = tmp_path / "s.csv"
+    path.write_text(
+        "Post URL,Title,Outbound URL,Landing URL\n"
+        f"{LI}pulse/a/,A,https://lnkd.in/1,{W}us/en/landing\n"
+        f"{LI}pulse/b/,B,https://lnkd.in/2,\n"                      # not resolved
+        f"{LI}pulse/c/,C,https://lnkd.in/3,{W}gb/en/page\n"         # locale filter
+        f"{LI}pulse/d/,D,https://lnkd.in/4,https://other.test/x\n"   # other host
+    )
+    rows = read_rows(path)
+    assert rows.columns == {"seed_url": "Post URL", "post_title": "Title", "outbound_url_raw": "Outbound URL",
+                            "outbound_resolved_url": "Landing URL"}
+    c = config()
+    p = plan(rows, c.scope, [], [W + "us/en/entry/"], c.win, dead={W + "us/en/gone"})
+    assert p.new_entries == [W + "us/en/landing"]
+    reasons = dict(p.not_entries)
+    assert reasons["https://lnkd.in/2"].startswith("short link not resolved")
+    assert reasons[W + "gb/en/page"] == "excluded by the locale filters"
+    assert reasons["https://other.test/x"] == "host other.test is not in scope.allowed_domains"
+
+
+def test_reasons_cover_wins_dead_pages_and_empty_rows(tmp_path):
+    c = config()
+    p = plan(read_rows(write_rows(tmp_path / "s.csv", ROWS + [
+        {"seed_url": LI + "pulse/dead/", "outbound_url_raw": "x", "outbound_resolved_url": W + "us/en/gone"},
+    ])), c.scope, c.campaigns[0].ad_urls, [W + "us/en/entry/"], c.win, dead={W + "us/en/gone"})
+    reasons = dict(p.not_entries)
+    assert reasons[S + "consumer-trends-page.html"] == "win page"
+    assert reasons[W + "us/en/gone"] == "dead page"
+    assert reasons[LI + "pulse/no-link-post (no link)"] == "no landing page in the row"
+    assert reasons[normalize_seed_url(POST_C)] == "another post (added as a seed)"
