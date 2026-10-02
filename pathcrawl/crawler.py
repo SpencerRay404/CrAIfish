@@ -32,7 +32,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 from pathcrawl.config import CampaignConfig, Config
-from pathcrawl.extract import detect_block, extract_links, extract_page, visible_text
+from pathcrawl.extract import detect_block, detect_dead, extract_links, extract_page, visible_text
 from pathcrawl.store import LinkRecord, PageRecord, Store
 
 # --------------------------------------------------------------------------- operator
@@ -266,6 +266,16 @@ class Crawler:
             url = self.scope.normalize(link.url)
             self.store.add_entry(i, link.label, link.url, url)
             self.store.enqueue(url, 0, None)
+        if self.campaign.external_seeds and not Path(self.campaign.external_seeds).exists():
+            self.console.print(f"[yellow]External seed file {escape(self.campaign.external_seeds)} not found; "
+                               "crawling the configured entry links only.[/]")
+        elif self.campaign.external_seeds:
+            from pathcrawl.seeds import ingest
+
+            r = ingest(self.store, self.config, self.campaign, Path(self.campaign.external_seeds))
+            self.console.print(f"External seeds: {len(r.seeds)} posts, {len(r.new_entries)} new entry links "
+                               f"({len(r.skipped_seeds)} posts already listed, {r.duplicate_rows} duplicate rows)",
+                               highlight=False)
 
     # ------------------------------------------------------------------ main loop
 
@@ -338,6 +348,8 @@ class Crawler:
                 self._resume_hint("The browser window was closed; progress saved.")
             finally:
                 self.store.set_meta(status=status, finished_at=datetime.now(UTC).isoformat(timespec="seconds"))
+                if status in ("complete", "budget") and self.config.health.check_site_files:
+                    self._site_signals(context.request)
                 for closeable in (context, browser):
                     try:
                         closeable.close()
@@ -345,6 +357,19 @@ class Crawler:
                         pass  # already closed by the person watching
         self._summary()
         return status
+
+    def _site_signals(self, request) -> None:
+        """robots.txt AI rules, llms.txt and sitemap coverage per crawled host (a few requests each)."""
+        from pathcrawl.health import collect_site_signals, playwright_fetch, site_bases
+
+        try:
+            crawled = [r["url"] for r in self.store.db.execute(
+                "SELECT url FROM pages WHERE status IN ('ok', 'http_error')")]
+            signals = collect_site_signals(site_bases(crawled, self.scope.allowed_domains), playwright_fetch(request), crawled, self.scope.normalize,
+                                           self.config.health.ai_crawlers or None)
+            self.store.set_meta(site_signals=signals)
+        except Exception as e:  # never lose a finished crawl over this
+            self.console.print(f"[yellow]Site files not checked: {escape(str(e).splitlines()[0] if str(e) else '')}[/]")
 
     def _resume_hint(self, what: str) -> None:
         self.console.print(f"[yellow]{what} Resume with: pathcrawl crawl --resume {escape(str(self.run_dir))}[/]")
@@ -500,12 +525,16 @@ class Crawler:
             queue_url=url,
         )
 
+    def _win_source(self, url: str) -> str:
+        return "known" if self.config.win.known_page(url) else "pattern"
+
     def _process(self, url: str, depth: int) -> None:
         is_entry = self.store.is_entry(url)
         # A URL matching the win patterns is a win whether or not it can be loaded.
         url_win = self.config.win.url_matches(url)
         if not self.robots.allowed(url):
-            self._save_failed(url, depth, "robots", "disallowed by robots.txt", win=url_win, win_source="pattern")
+            self._save_failed(url, depth, "robots", "disallowed by robots.txt", win=url_win,
+                              win_source=self._win_source(url))
             self._log(depth, "robots", url, "skipped: disallowed by robots.txt"
                       + (" · win matched by URL, not loaded" if url_win else ""), win=url_win)
             return
@@ -514,7 +543,7 @@ class Crawler:
             # nothing past it to follow. (With require_form it is loaded to
             # check the form, but its links are still not followed.)
             self._save_failed(url, depth, NOT_FETCHED, "win page: matched by URL; the crawl stops at the win",
-                              win=True, win_source="pattern")
+                              win=True, win_source=self._win_source(url))
             self._log(depth, "win", url, "matched by URL; not loaded, links not followed", win=True)
             return
 
@@ -577,9 +606,10 @@ class Crawler:
                     continue
 
             links = [
-                LinkRecord(lk.href, lk.url, lk.text, lk.region, bool(lk.url and self.scope.in_scope(lk.url)))
+                LinkRecord(lk.href, lk.url, lk.text, lk.region, bool(lk.url and self.scope.in_scope(lk.url)),
+                           mc_id=lk.mc_id)
                 for lk in extract_links(visit.html, final, self.scope.strip_query_params,
-                                        self.scope.region_selectors.model_dump())
+                                        self.scope.region_selectors.model_dump(), self.scope.capture_params)
             ]
             crawlable = {lk.url for lk in links if lk.in_scope and lk.url != final}
             # A win page with nowhere to go is fine: the journey is already complete.
@@ -612,11 +642,12 @@ class Crawler:
         win_cfg = self.config.win
         url_win = win_cfg.url_matches(final)
         win = url_win and (data.form_present is not False or not win_cfg.require_form)
-        win_source = "pattern" if win else None
+        win_source = self._win_source(final) if win else None
         if decision and decision.action == MARK_WIN and not win:
             win, win_source = True, "operator"
         raw_len = self._raw_text_len(final)
         rendered_len = len(data.text)
+        dead_reason = detect_dead(visit.http_status, data.title, data.text)
         return PageRecord(
             url=final,
             requested_url=url,
@@ -640,6 +671,13 @@ class Crawler:
             screenshot=self._screenshot(page, final),
             win=win,
             win_source=win_source,
+            dead_reason=dead_reason,
+            is_dead=dead_reason is not None,
+            microdata_types=data.microdata_types,
+            rdfa_types=data.rdfa_types,
+            og_properties=data.og_properties,
+            hreflang=data.hreflang,
+            robots_meta=data.robots_meta,
         )
 
     def _follow_operator_url(self, src: str, depth: int, decision: Decision) -> None:

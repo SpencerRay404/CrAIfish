@@ -209,24 +209,30 @@ def _to_jsonable(value: object) -> object:
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
-def _open(run: Path):
+CONFIG_HELP = "Client config to use instead of the run's saved copy (for settings added since the crawl)."
+
+
+def _open(run: Path, config: Path | None = None):
     from pathcrawl.run import RunError, open_run
 
     try:
-        return open_run(run)
+        return open_run(run, config)
     except (RunError, ConfigError) as e:
         err_console.print(f"[bold red]error:[/] {escape(str(e))}")
         raise typer.Exit(code=2) from None
 
 
 @app.command()
-def analyze(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
+def analyze(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
     """Compute every path metric for a crawl and save analysis.json."""
     import json
 
     from pathcrawl.graph import MODES
 
-    r = _open(run)
+    r = _open(run, config)
     result = r.analyze()
     (run / "analysis.json").write_text(json.dumps(result.to_dict(), indent=2, default=_to_jsonable))
 
@@ -259,12 +265,15 @@ def analyze(run: Path = typer.Option(..., "--run", help="A run directory from pa
 
 
 @app.command()
-def categorize(run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl.")) -> None:
+def categorize(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
     """Categorize every crawled page (section, page type, reachability, content signals) into categories.csv."""
     from pathcrawl.categorize import categorize as categorize_pages
     from pathcrawl.categorize import summarize, write_csv
 
-    r = _open(run)
+    r = _open(run, config)
     rows = categorize_pages(r.store, r.graph, r.analyze(), r.config.scope.locale_include)
     write_csv(rows, run / "categories.csv")
     summary = summarize(rows)
@@ -285,6 +294,7 @@ def report(
     taxonomy: Path | None = typer.Option(
         None, "--taxonomy", help="Entity taxonomy (default: configs/<client>.entities.yaml, else the run's copy)."
     ),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
 ) -> None:
     """Write every report file for a run (report.md, report.json, graphs, CSVs).
 
@@ -292,10 +302,16 @@ def report(
     to the taxonomy show up in the report without re-crawling."""
     from pathcrawl.report import headline, write_report
 
-    r = _open(run)
+    r = _open(run, config)
     r.close()
     _extract_entities(run, r.config.client.slug, taxonomy)
-    r = _open(run)
+    r = _open(run, config)
+    if r.config.leads.files:
+        missing = [f.path for f in r.config.leads.files if not Path(f.path).exists()]
+        if missing:
+            err_console.print(f"[yellow]Lead file(s) not found, lead join skipped: {escape(', '.join(missing))}[/]")
+        else:
+            _run_leads(r)
     paths = write_report(r)
     console.print(f"[bold]{escape(headline(r.analyze(), r.config.win.name))}[/]")
     r.close()
@@ -427,3 +443,165 @@ def entities_accept(
     console.print(f"Added {len(added)} entities to {escape(str(taxonomy))}:")
     for a in added:
         console.print(f"  {escape(a)}", highlight=False)
+
+
+@app.command("backfill-links")
+def backfill_links_cmd(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(
+        None, "--config", "-c",
+        help="Client config for capture_params (default: the run's copy, else configs/<client>.yaml).",
+    ),
+) -> None:
+    """Fill columns added since a run was crawled (link campaign tags, dead pages), from its crawl.db. Fetches nothing."""
+    from pathcrawl.backfill import backfill_links
+
+    r = _open(run, config)
+    if not r.config.scope.capture_params and config is None:
+        live = Path("configs") / f"{r.config.client.slug}.yaml"
+        if live.exists():
+            r.close()
+            r = _open(run, live)
+            console.print(f"Using {escape(str(live))} (the run's saved config has no capture_params)")
+    if not r.config.scope.capture_params:
+        err_console.print("[yellow]scope.capture_params is empty; no link tags to fill. Set it, e.g. "
+                          '["WT.mc_id"], or pass --config.[/]')
+    s = backfill_links(r.store, r.config.scope)
+    r.close()
+    console.print(f"Links: {s.links_tagged} of {s.links} carry a tag ({', '.join(r.config.scope.capture_params) or '-'}); "
+                  f"{s.distinct_tags} distinct tags on {s.source_pages} source pages. Dead pages: {s.dead_pages}.",
+                  highlight=False, soft_wrap=True)
+    if s.duplicate_pages:
+        merged = sum(1 for g in s.duplicate_pages if len(g) > 1)
+        console.print(f"Merged {merged} pages that were stored under more than one URL and renamed "
+                      f"{len(s.duplicate_pages) - merged} (a param now stripped, e.g. msockid); "
+                      f"{s.links_renormalized} link targets rewritten to the clean URL.",
+                      highlight=False, soft_wrap=True)
+        for group in s.duplicate_pages[:20]:
+            console.print("  " + escape(" + ".join(group)), highlight=False, soft_wrap=True)
+
+
+@app.command()
+def leads(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
+    """Join aggregated lead counts per campaign tag (leads.files) to the links carrying each tag."""
+    r = _open(run, config)
+    if not r.config.leads.files:
+        err_console.print("[bold red]leads:[/] no leads.files in the config; pass --config configs/<client>.yaml")
+        r.close()
+        raise typer.Exit(code=2)
+    try:
+        _run_leads(r)
+    finally:
+        r.close()
+
+
+def _run_leads(r) -> None:
+    from pathcrawl.leads import LeadFileError, run_leads
+
+    if not r.store.db.execute("SELECT 1 FROM links WHERE mc_id IS NOT NULL LIMIT 1").fetchone():
+        err_console.print("[yellow]No link in this run carries a tag yet. Run pathcrawl backfill-links first "
+                          "(or set scope.capture_params before crawling).[/]")
+    try:
+        result, out = run_leads(r.store, r.config, r.dir)
+    except LeadFileError as e:
+        err_console.print(f"[bold red]leads:[/] {escape(str(e))}", highlight=False)
+        raise typer.Exit(code=1) from None
+    matched = [t for t in result.tags if t.join]
+    total = sum(t.leads for t in result.lead_tags.values())
+    covered = sum(t.leads for t in matched)
+    pages = {row.src for row in result.rows}
+    console.print(
+        f"Leads: {len(result.lead_tags)} tags, {len(matched)} joined to crawled links "
+        f"({sum(1 for t in matched if t.join == 'exact')} exact), covering {covered:g} of {total:g} leads; "
+        f"{len(pages)} pages carry allocated leads. Wrote {escape(str(out))}",
+        highlight=False, soft_wrap=True,
+    )
+
+
+@app.command("external-seeds")
+def external_seeds_cmd(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+    seeds: Path | None = typer.Option(None, "--seeds", help="Seed CSV (default: the campaign's external_seeds)."),
+) -> None:
+    """Add hand-collected posts (e.g. LinkedIn) to a run as external entry points.
+
+    New landing pages are queued; crawl them with pathcrawl crawl --resume."""
+    from pathcrawl.seeds import SeedFileError, ingest
+
+    r = _open(run, config)
+    try:
+        try:
+            campaign = r.config.campaign(r.store.meta("campaign_id") or r.config.campaigns[0].id)
+        except ConfigError as e:
+            err_console.print(f"[bold red]external-seeds:[/] {escape(str(e))}")
+            raise typer.Exit(code=2) from None
+        path = seeds or (Path(campaign.external_seeds) if campaign.external_seeds else None)
+        if path is None:
+            err_console.print("[bold red]external-seeds:[/] no seed file; pass --seeds or set external_seeds")
+            raise typer.Exit(code=2)
+        try:
+            result = ingest(r.store, r.config, campaign, path)
+        except SeedFileError as e:
+            err_console.print(f"[bold red]external-seeds:[/] {escape(str(e))}", highlight=False)
+            raise typer.Exit(code=1) from None
+    finally:
+        r.close()
+    console.print(f"{len(result.seeds)} posts added; {len(result.skipped_seeds)} skipped (already ad URLs or entry "
+                  f"links), {result.duplicate_rows} duplicate rows. {len(result.new_entries)} new entry links queued, "
+                  f"{len(result.existing_entries)} already entry links.", highlight=False, soft_wrap=True)
+    if result.columns_used:
+        console.print("Columns read: " + ", ".join(f"{k} <- {v!r}" for k, v in result.columns_used.items()),
+                      highlight=False, soft_wrap=True)
+    from collections import Counter
+
+    reasons = Counter(reason for _, reason in result.not_entries)
+    if reasons:
+        console.print("Outbound links not made entry links:", highlight=False)
+        for reason, n in reasons.most_common():
+            console.print(f"  {n} × {escape(reason)}", highlight=False, soft_wrap=True)
+        for target, reason in result.not_entries[:30]:
+            console.print(f"    {escape(target)}  ({escape(reason)})", highlight=False, soft_wrap=True)
+    if result.new_entries:
+        console.print("Crawl the new entry links with:")
+        console.print(escape(f"pathcrawl crawl --resume {run}"), soft_wrap=True, highlight=False)
+
+
+@app.command("site-signals")
+def site_signals_cmd(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    config: Path | None = typer.Option(None, "--config", "-c", help=CONFIG_HELP),
+) -> None:
+    """Check robots.txt AI-crawler rules, llms.txt and sitemap coverage for each crawled host.
+
+    A few requests per host (robots.txt, llms.txt, the sitemaps robots.txt declares)."""
+    from pathcrawl.health import collect_site_signals, site_bases, urllib_fetch
+
+    r = _open(run, config)
+    try:
+        crawled = [x["url"] for x in r.store.db.execute("SELECT url FROM pages WHERE status IN ('ok', 'http_error')")]
+        ua = r.store.meta("user_agent") or "pathcrawl"
+        signals = collect_site_signals(site_bases(crawled, r.config.scope.allowed_domains), urllib_fetch(ua), crawled, r.config.scope.normalize,
+                                       r.config.health.ai_crawlers or None)
+        r.store.set_meta(site_signals=signals)
+    finally:
+        r.close()
+    for host, h in signals.items():
+        blocked = [b for b, v in h["ai_crawlers"].items() if not v["allowed_home"]]
+        robots = "yes" if h["robots_txt"] else f"no (HTTP {h['robots_status'] or 'error: no response'})"
+        console.print(f"{escape(host)}: robots.txt {robots}, "
+                      f"AI crawlers blocked from home: {len(blocked)}"
+                      + (f" ({', '.join(blocked)})" if blocked else "")
+                      + f", llms.txt {'yes' if h['llms_txt'] else 'no'}, sitemaps read {h['sitemaps_read']} of "
+                      f"{len(h['sitemaps_declared'])} declared, sitemap URLs {h['sitemap_urls']}, crawled pages in "
+                      f"sitemap {h['crawled_pages_in_sitemap']}/{h['crawled_pages']}", highlight=False, soft_wrap=True)
+        for e in h["errors"][:3]:
+            console.print(f"  [yellow]{escape(e)}[/]", highlight=False, soft_wrap=True)
+    if any(not h["robots_txt"] or h["errors"] for h in signals.values()):
+        console.print("HTTP 403 or no response usually means the site refuses plain HTTP clients. The crawler "
+                      "checks the same files with its browser at the end of a crawl, which may get through.",
+                      highlight=False, soft_wrap=True)
+    console.print("Saved; run pathcrawl report to include them.")

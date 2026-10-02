@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
-from pathcrawl.normalize import normalize_url
+from pathcrawl.normalize import captured_param, normalize_url
 
 NAV, HEADER, FOOTER, BODY = "nav", "header", "footer", "body"
 # Site chrome: links here are excluded in "content links only" mode.
@@ -33,6 +33,7 @@ class Link:
     url: str | None  # normalized absolute URL, or None if not crawlable (mailto:, etc.)
     text: str  # anchor text, falling back to aria-label / title / image alt
     region: str  # nav, header, footer or body
+    mc_id: str | None = None  # campaign tag from the raw href (scope.capture_params)
 
 
 def _anchor_text(a: Tag) -> str:
@@ -82,11 +83,14 @@ def extract_links(
     page_url: str,
     strip_params: Iterable[str] = (),
     region_selectors: dict[str, list[str]] | None = None,
+    capture_params: Iterable[str] = (),
 ) -> list[Link]:
     """Every ``<a href>`` on the page, in document order.
 
     ``region_selectors`` maps nav/header/footer to extra CSS selectors (from the
     client config) for menus that aren't built from semantic elements.
+    ``capture_params`` names query params (e.g. ``WT.mc_id``) whose value is kept
+    on the link as ``mc_id`` before normalization strips them from the URL.
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -111,6 +115,7 @@ def extract_links(
                 url=normalize_url(href, base=base, strip_params=strip),
                 text=_anchor_text(a),
                 region=link_region(a, custom),
+                mc_id=captured_param(href, capture_params),
             )
         )
     return links
@@ -160,6 +165,12 @@ class PageData:
     jsonld_types: list[str]  # empty = no structured data found
     form_present: bool | None  # None when no form_selector is configured
     text: str
+    # Machine-readability signals beyond JSON-LD (website health view)
+    microdata_types: list[str] = field(default_factory=list)  # itemtype values (last path segment)
+    rdfa_types: list[str] = field(default_factory=list)  # typeof values
+    og_properties: list[str] = field(default_factory=list)  # og:* meta properties present
+    hreflang: list[str] = field(default_factory=list)  # languages of <link rel=alternate hreflang>
+    robots_meta: str | None = None  # content of <meta name=robots>
 
 
 def extract_page(html: str, page_url: str, form_selector: str | None = None) -> PageData:
@@ -190,6 +201,19 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
 
     form_present = bool(soup.select_one(form_selector)) if form_selector else None
 
+    microdata = {_schema_name(str(t)) for el in soup.find_all(attrs={"itemtype": True})
+                 for t in str(el["itemtype"]).split()}
+    microdata |= {"(untyped)" for el in soup.find_all(attrs={"itemscope": True}) if not el.get("itemtype")}
+    rdfa = {_schema_name(t) for el in soup.find_all(attrs={"typeof": True}) for t in str(el["typeof"]).split()}
+    og = {str(m.get("property")).lower() for m in soup.find_all("meta", attrs={"property": True})
+          if str(m.get("property")).lower().startswith("og:")}
+    hreflang = set()
+    for link in soup.find_all("link", attrs={"hreflang": True}):
+        rel = link.get("rel") or []
+        if "alternate" in [r.lower() for r in (rel if isinstance(rel, list) else [rel])]:
+            hreflang.add(str(link["hreflang"]).strip().lower())
+    robots = soup.find("meta", attrs={"name": lambda v: v and v.lower() == "robots"})
+
     return PageData(
         title=title,
         meta_description=description,
@@ -198,7 +222,18 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
         jsonld_types=sorted(set(types)),
         form_present=form_present,
         text=visible_text(html),
+        microdata_types=sorted(microdata),
+        rdfa_types=sorted(rdfa),
+        og_properties=sorted(og),
+        hreflang=sorted(hreflang),
+        robots_meta=" ".join(str(robots.get("content", "")).split()).lower() or None if robots else None,
     )
+
+
+def _schema_name(t: str) -> str:
+    """``https://schema.org/Article`` -> ``Article``; ``schema:Article`` -> ``Article``."""
+    t = t.strip().rstrip("/")
+    return t.rsplit("/", 1)[-1].rsplit(":", 1)[-1].rsplit("#", 1)[-1] or t
 
 
 # A few phrases that bot walls and CAPTCHA interstitials reliably show.
@@ -224,5 +259,32 @@ def detect_block(http_status: int | None, title: str | None, text: str) -> str |
     for phrase in _BLOCK_PHRASES:
         # Short pages only: a long article that merely mentions "captcha" is not a wall.
         if phrase in haystack and len(text) < 3000:
+            return f"page says {phrase!r}"
+    return None
+
+
+DEAD_STATUSES = (404, 410)
+DEAD_TITLE_PHRASES = ("page not found",)
+DEAD_TEXT_PHRASES = ("this page no longer exists",)
+
+
+def detect_dead(http_status: int | None, title: str | None, text: str | None) -> str | None:
+    """Why a page counts as gone, or None if it doesn't.
+
+    HTTP 404 or 410; or a "soft 404" served with HTTP 200: a title starting
+    with 404 or containing "Page Not Found", or body text saying the page no
+    longer exists.
+    """
+    if http_status in DEAD_STATUSES:
+        return f"HTTP {http_status}"
+    t = (title or "").strip().lower()
+    if t.startswith("404"):
+        return "title starts with 404"
+    for phrase in DEAD_TITLE_PHRASES:
+        if phrase in t:
+            return f"title says {phrase!r}"
+    body = (text or "").lower()
+    for phrase in DEAD_TEXT_PHRASES:
+        if phrase in body:
             return f"page says {phrase!r}"
     return None

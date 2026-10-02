@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from fnmatch import fnmatchcase
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 CRAWLABLE_SCHEMES = frozenset({"http", "https"})
 DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -82,6 +82,53 @@ def normalize_url(
     query = urlencode(params)
 
     return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def captured_param(href: str | None, names: Iterable[str]) -> str | None:
+    """The value of the first query param in ``href`` whose name matches one of
+    ``names`` (case-insensitive), read from the raw href before normalization.
+
+    Used to keep a campaign tag such as ``WT.mc_id`` on a link even though the
+    param is stripped from the URL for node identity. Empty values count as absent.
+    """
+    names = [n.lower() for n in names]
+    if not href or not names:
+        return None
+    try:
+        query = urlsplit(href.strip()).query
+    except ValueError:
+        return None
+    params = {k.lower(): v for k, v in parse_qs(query, keep_blank_values=False).items()}
+    for name in names:
+        values = [v.strip() for v in params.get(name, []) if v.strip()]
+        if values:
+            return values[0]
+    return None
+
+
+def normalize_conversion_url(url: str | None) -> str | None:
+    """Normalize a conversion-page URL from a CRM or lead export for matching.
+
+    Drops the query and fragment and lowercases host and path (exports spell
+    the same page in different cases). Returns None for empty values, the
+    literal ``null`` and landing-page editor previews (``lpeditor``,
+    ``devicePreview``). A missing scheme is taken as https.
+    """
+    url = (url or "").strip()
+    if not url or url.lower() in ("null", "none", "nan"):
+        return None
+    if "://" not in url:
+        url = "https://" + url.lstrip("/")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").rstrip(".").lower()
+    path = (parts.path or "/").lower()
+    if not host or "lpeditor" in path or "devicepreview" in path:
+        return None
+    scheme = parts.scheme.lower() if parts.scheme.lower() in CRAWLABLE_SCHEMES else "https"
+    return urlunsplit((scheme, host, path, "", ""))
 
 
 def host_of(url: str) -> str:

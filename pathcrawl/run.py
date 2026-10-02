@@ -31,11 +31,14 @@ class Run:
         self.store.close()
 
 
-def open_run(run_dir: str | Path) -> Run:
+def open_run(run_dir: str | Path, config_path: str | Path | None = None) -> Run:
+    """Open a run. ``config_path`` replaces the config snapshot saved with the
+    run, so settings added since the crawl (lead files, known win pages,
+    capture params) apply to an older run without re-crawling."""
     run_dir = Path(run_dir)
     if not (run_dir / "crawl.db").exists() or not (run_dir / "config.yaml").exists():
         raise RunError(f"{run_dir} is not a run directory (needs crawl.db and config.yaml)")
-    config = load_config(run_dir / "config.yaml")
+    config = load_config(config_path or run_dir / "config.yaml")
     store = Store(run_dir / "crawl.db")
     for key, value in (store.meta("crawl_overrides", {}) or {}).items():
         setattr(config.crawl, key, value)

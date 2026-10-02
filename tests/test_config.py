@@ -81,7 +81,9 @@ def test_ups_config():
         url = c.scope.normalize(f"https://solutions.ups.com/virtual-consultation-us-en-v4.html?WT.mc_id=ONLINE_CONTENT_{code}")
         assert url == "https://solutions.ups.com/virtual-consultation-us-en-v4.html"
         assert c.win.url_matches(url)
-    assert not c.win.url_matches("https://solutions.ups.com/manufacturing-ussp-page.html")
+    # a white-paper conversion page, listed in win.known_pages
+    assert c.win.win_type("https://solutions.ups.com/manufacturing-ussp-page.html") == "White papers & reports"
+    assert not c.win.url_matches("https://solutions.ups.com/retail-ussp-page.html")
 
 
 def test_example_config_has_no_warnings():

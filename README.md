@@ -285,6 +285,150 @@ site itself, backed by this crawl's numbers:
 - declared page metadata (industry, journey stage, persona) to replace
   inferred tags.
 
+## External entry points (posts collected by hand)
+
+LinkedIn sits behind a login wall and is never crawled. Its posts can still be
+entry points: list them in a CSV and set `external_seeds` on the campaign.
+`data/templates/linkedin_scrape_template.csv` has the columns. Write one row
+per outbound link in a post:
+
+| column | content |
+|---|---|
+| `seed_url` | the post |
+| `post_title` | optional |
+| `outbound_url_raw` | the link as it appears (often a short link) |
+| `anchor_text`, `link_order` | optional |
+| `outbound_resolved_url` | where it lands, with its query string; the campaign tag is read from here |
+
+- **Dedupe.** Posts already in `ad_urls` or `entry_links` are skipped, and
+  repeated (post, landing page) pairs are dropped. Posts and landing pages are
+  compared with a lowercase host and without query, fragment or trailing
+  slash. A post with several links keeps them all.
+- **Nodes and edges.** Each post becomes a node with status `external` and
+  its platform as `channel`. `post_date_derived` comes from a LinkedIn
+  activity ID, where the ID shifted right by 22 bits is epoch milliseconds.
+  Each outbound link becomes a link carrying its tag, so it joins to leads
+  like any other link. A link that resolves to another post adds that post
+  as a seed.
+- **Entry links.** A landing page on an allowed domain becomes an entry link,
+  queued at depth 0, unless it already is one or is a win.
+- **Privacy.** Only the post URL, title, date and links are stored.
+
+A fresh crawl ingests the file automatically. For an existing run, use
+`pathcrawl external-seeds --run <run dir> [--config ...]`, then `pathcrawl
+crawl --resume <run dir>` to crawl the new entry links. Add `--max-pages` if
+the run stopped at its page budget. The report gets an "External entry
+points" section.
+
+## Dead pages
+
+A loaded page is **dead** if it answers HTTP 404 or 410, or is a soft 404
+served with HTTP 200. A soft 404 is a title starting with `404` or containing
+"Page Not Found", or body text saying "this page no longer exists". The
+crawler records `pages.is_dead` and `dead_reason`, and `pathcrawl
+backfill-links` fills them for older runs.
+
+The report's **Dead pages** section lists:
+- each dead page and why it counts as dead;
+- the pages still linking to it;
+- how many of those links are in the body, how many are in the nav, header
+  or footer, and how many come from external posts;
+- any campaign tag riding on those links.
+
+`<client>_dead_pages.csv` has one row per link into a dead page. In
+`graph.gexf` and `report.json`, nodes carry `is_dead`,
+`inbound_dead_links`, `dead_inbound_pages` and `dead_inbound_body_links`,
+and edges carry `to_dead`. A post's landing page that is dead keeps its edge
+(flagged `to_dead`) and is never made an entry link.
+
+## Website health
+
+Every report has a **Website health** section, and `<client>_site_health.csv`
+has one row per loaded page. The section covers dead pages, how easy content
+is to reach, and how machine-readable each page is for search engines and AI
+agents.
+
+**Per page**
+- **Click depth from home**, counted twice: over every link
+  (`clicks_from_home_all_links`) and over body links only
+  (`clicks_from_home_body_links`). The start page is `health.home_url`, or
+  else the first entry link.
+- **Inbound links**: `inbound_links`, plus `is_dead` and
+  `dead_inbound_pages`.
+- **Titles and descriptions**: `has_title`, `title_duplicated`,
+  `has_meta_description` and `meta_duplicated`. Duplicate means the same
+  lowercased text on more than one loaded page.
+- **Structure**: `h1_count` and `canonical_self`.
+- **Structured data**: `structured_data_types` (JSON-LD) and
+  `has_structured_data` (JSON-LD, Microdata or RDFa), reported separately
+  from `microdata_types`, `rdfa_types` and `og_properties` (Open Graph).
+- **Language and indexing**: `hreflang` and `robots_meta`.
+- **JavaScript dependence**: `js_dependent` (the raw HTML has under half the
+  rendered text) and `raw_text_share`.
+- **Redirects and leads**: `redirect_hops`, `carries_lead_tags` and
+  `leads_allocated`.
+
+Microdata, RDFa, Open Graph, hreflang and the robots meta tag are recorded
+from the rendered page. Runs crawled before this change don't have them,
+and the report says so.
+
+**Per host**
+- the robots.txt rules for named AI crawlers (GPTBot, ClaudeBot,
+  PerplexityBot, Google-Extended and others; set `health.ai_crawlers` to
+  change the list);
+- whether `llms.txt` exists;
+- the declared sitemaps, and how many crawled pages they list.
+
+These are fetched once per host at the end of a crawl. Turn that off with
+`health.check_site_files: false`, or fetch them for an existing run with
+`pathcrawl site-signals --run <run dir>`.
+
+**Breakdowns and graph attributes.** The report breaks the signals down by
+section and by page type, with a separate row for pages carrying leads.
+`graph.gexf` and `report.json` carry `is_dead`, `has_structured_data`,
+`js_dependent` and both click depths.
+
+## Lead evidence
+
+With campaign tags kept on links (`scope.capture_params`, above), aggregated
+lead counts per tag can be joined to the pages that carry each tag:
+
+```bash
+pathcrawl backfill-links --run <run dir>                      # older runs only: fill links.mc_id
+pathcrawl leads  --run <run dir> --config configs/ups.yaml    # join; also runs inside `report`
+pathcrawl report --run <run dir> --config configs/ups.yaml
+```
+
+The input is a CSV of **counts per tag only** (`leads.files`). The columns
+are `wt_mc_id`, `leads_most_recent_tag`, `leads_source_initiative_tag`,
+`paid_click_leads` and `main_conversion_page`. Other count columns, such
+as `distinct_visitors`, are fine. The loader refuses any file that looks
+like a raw CRM export: a column that identifies a person or visitor (a token
+or tracking cookie, e-mail, lead, visitor or contact ID, IP address), a
+`token:` value, or an e-mail address. `.gitignore` excludes `data/**/raw*` and
+`*MKT_TRK*`.
+
+- **Join.** Each lead tag is matched case-sensitively against `links.mc_id`.
+  With `join.fallback: strip_numeric_suffix`, a tag with no exact match is
+  tried again with a trailing `_NNNNN` (5 to 7 digits) removed on both sides.
+- **Allocation.** A tag's leads are split evenly over the distinct pages
+  whose links carry it: `exact` when one page carries the tag, `shared`
+  otherwise. Rows go to the `lead_attribution` table and
+  `<client>_lead_attribution.csv`.
+- **Graph and JSON.** Nodes get `leads_origin` (allocated leads),
+  `leads_exact`, and `leads_landed` (leads whose main conversion page is
+  that page). Edges from a tagged page to its link target get `leads`.
+- **Report section "Lead evidence"** lists:
+  - the top pages carrying leads, and exact versus shared;
+  - tags whose leads converted somewhere other than where the link points;
+  - tags with leads that no crawled link carries;
+  - crawled pages that link to the form without a tag;
+  - tags on form links with no leads;
+  - the paid-click share.
+
+  Tags under `leads.min_cell` leads (default 5) are rolled into one
+  "(other, <5 leads)" line. Full detail stays in the run folder's CSV.
+
 ## Test gates
 
 Each build step has to pass these before it merges. You can run all of them
@@ -340,6 +484,14 @@ the output directory `runs/<slug>/...`.
   e.g. `www.ups.com/us/en/...` but `solutions.ups.com/some-page.html`.
 - **`strip_query_params`**: query params removed before URLs are compared.
   Globs are allowed (`utm_*`), and matching ignores case.
+- **`capture_params`** (optional): query params whose value is kept on each
+  link before being stripped, e.g. `["WT.mc_id"]`. The value is stored in
+  `links.mc_id` so lead counts can be joined to the link that carried the
+  tag. For a run crawled before this existed, `pathcrawl backfill-links --run
+  <run dir>` fills it from the raw hrefs in `crawl.db`, fetching nothing.
+  It also merges pages stored under two URLs that now normalize the same,
+  such as a page crawled once with `?msockid=...`. The tags on both copies'
+  links are kept, and the old spelling becomes an alias.
 - **`region_selectors`** (optional): extra CSS selectors for `nav`,
   `header` and `footer`. Links inside `<nav>`, `<header>` and `<footer>`
   (and the matching ARIA roles) are classified automatically. Add selectors
@@ -353,6 +505,17 @@ the output directory `runs/<slug>/...`.
   pattern starting with `re:` is a Python regex that must match the whole
   URL. Patterns are matched against the normalized URL, which has a lowercase
   host, no fragment, and no stripped params.
+- **`known_pages`** (optional): further win pages, each with a conversion
+  `type`, e.g. `{url: ".../sbr-signup-ussp-page.html", type: "White papers &
+  reports"}`. They are wins even if robots.txt blocks them or no crawled page
+  links to them; unlinked ones are added as nodes. The report and graphs show
+  each win's type.
+- **`exclude_patterns`** (optional): globs for URLs that are never wins, such
+  as an internal preview tool. These override `url_patterns` and
+  `known_pages`.
+- **`match`** (`exact` or `case_insensitive_path`): with
+  `case_insensitive_path`, patterns, exclusions and known pages ignore path
+  case, and known pages also ignore the query.
 - **`form_selector`** (optional): a CSS selector that confirms the win form
   rendered on the page.
 - **`require_form`** (default `false`): when false, a URL match counts as a win

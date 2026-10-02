@@ -13,15 +13,16 @@ from __future__ import annotations
 
 import re
 from fnmatch import fnmatchcase
+from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import soupsieve
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from pathcrawl.normalize import host_allowed, host_of, locale_allowed, normalize_url
+from pathcrawl.normalize import host_allowed, host_of, locale_allowed, normalize_conversion_url, normalize_url
 
 PLACEHOLDER = "REPLACE-ME"
 REGEX_PREFIX = "re:"
@@ -76,6 +77,10 @@ class ScopeConfig(_Strict):
     # but solutions.ups.com/some-page.html).
     locale_hosts: list[str] = []
     strip_query_params: list[str] = []
+    # Query params whose value is kept on each link (as links.mc_id) before it
+    # is stripped for node identity, e.g. ["WT.mc_id"]. Names match
+    # case-insensitively; the first one present on a link wins.
+    capture_params: list[str] = []
     region_selectors: RegionSelectors = RegionSelectors()
 
     @field_validator("allowed_domains")
@@ -116,9 +121,39 @@ class ScopeConfig(_Strict):
         return self.domain_allowed(url) and self.locale_allowed(url)
 
 
+@lru_cache(maxsize=65536)
+def _known_key(match: str, url: str) -> str | None:
+    return normalize_conversion_url(url) if match == "case_insensitive_path" else normalize_url(url)
+
+
+class KnownWinPage(_Strict):
+    """A conversion page that is a win whether or not the crawler can open it
+    (robots.txt, gated asset), with the kind of conversion it is."""
+
+    url: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+
+    @field_validator("url")
+    @classmethod
+    def _absolute(cls, v: str) -> str:
+        if normalize_url(v) is None:
+            raise ValueError(f"{v!r} is not an absolute http(s) URL")
+        return v.strip()
+
+
 class WinConfig(_Strict):
     name: str = Field(min_length=1)
     url_patterns: list[str] = Field(min_length=1)
+    # Further win pages, each with a conversion type, added as win nodes even
+    # if the crawl cannot fetch them or no crawled page links to them.
+    known_pages: list[KnownWinPage] = []
+    # Globs (or "re:" regexes) for URLs that are never wins, e.g. an internal
+    # landing-page preview tool. They win over url_patterns and known_pages.
+    exclude_patterns: list[str] = []
+    # exact: patterns match the URL as normalized. case_insensitive_path:
+    # patterns, exclusions and known pages ignore the case of the path, and
+    # known pages also ignore the query string.
+    match: Literal["exact", "case_insensitive_path"] = "exact"
     form_selector: str | None = None
     # When false (the default), a page matching url_patterns is a win even if
     # form_selector is not found; the report flags it as "form not rendered".
@@ -128,7 +163,7 @@ class WinConfig(_Strict):
     # Left empty, they are derived from the patterns (see keywords()).
     near_miss_keywords: list[str] = []
 
-    @field_validator("url_patterns")
+    @field_validator("url_patterns", "exclude_patterns")
     @classmethod
     def _check_patterns(cls, patterns: list[str]) -> list[str]:
         for p in patterns:
@@ -147,20 +182,44 @@ class WinConfig(_Strict):
             raise ValueError("require_form is true but no form_selector is set")
         return self
 
+    def _matches_any(self, url: str, patterns: list[str]) -> bool:
+        fold = self.match == "case_insensitive_path"
+        for p in patterns:
+            if p.startswith(REGEX_PREFIX):
+                if re.fullmatch(p[len(REGEX_PREFIX):], url, re.IGNORECASE if fold else 0):
+                    return True
+            elif fnmatchcase(url.lower(), p.lower()) if fold else fnmatchcase(url, p):
+                return True
+        return False
+
+    def _known_key(self, url: str) -> str | None:
+        return _known_key(self.match, url)
+
+    def excluded(self, url: str) -> bool:
+        return self._matches_any(url, self.exclude_patterns)
+
+    def known_page(self, url: str) -> KnownWinPage | None:
+        key = self._known_key(url)
+        return next((k for k in self.known_pages if key and self._known_key(k.url) == key), None)
+
     def url_matches(self, url: str) -> bool:
-        """True if a normalized URL matches any win pattern.
+        """True if a normalized URL is a win: it matches a url_pattern or is a
+        known page, and matches no exclude pattern.
 
         Plain patterns are globs matched against the whole URL (``*`` also
         matches ``/``). Patterns starting with ``re:`` are Python regexes that
         must match the whole URL.
         """
-        for p in self.url_patterns:
-            if p.startswith(REGEX_PREFIX):
-                if re.fullmatch(p[len(REGEX_PREFIX):], url):
-                    return True
-            elif fnmatchcase(url, p):
-                return True
-        return False
+        if self.excluded(url):
+            return False
+        return self.known_page(url) is not None or self._matches_any(url, self.url_patterns)
+
+    def win_type(self, url: str) -> str | None:
+        """The conversion type of a win URL: its known page's type, else the win name."""
+        if not self.url_matches(url):
+            return None
+        known = self.known_page(url)
+        return known.type if known else self.name
 
     def keywords(self) -> list[str]:
         """Lowercase words that make a URL look like the win.
@@ -185,8 +244,8 @@ class WinConfig(_Strict):
 
     def near_miss(self, url: str) -> bool:
         """True if ``url`` looks like the win (a keyword in its path) but
-        matches no url_pattern."""
-        if self.url_matches(url):
+        matches no url_pattern, is no known page and isn't excluded."""
+        if self.url_matches(url) or self.excluded(url):
             return False
         path = urlsplit(url).path.lower()
         return any(k in path for k in self.keywords())
@@ -206,6 +265,10 @@ class CampaignConfig(_Strict):
     # never crawled: the crawl starts at entry_links.
     ad_urls: list[str] = []
     entry_links: list[EntryLink] = Field(min_length=1)
+    # A CSV of posts collected by hand (see pathcrawl/seeds.py): each post
+    # becomes an external node linking to the pages it points at, and new
+    # landing pages become entry links. Relative to where pathcrawl runs.
+    external_seeds: str | None = None
 
 
 class CrawlConfig(_Strict):
@@ -219,12 +282,67 @@ class CrawlConfig(_Strict):
     screenshot: bool = True
 
 
+class LeadFile(_Strict):
+    path: str = Field(min_length=1)  # relative to the directory pathcrawl runs in
+
+
+class LeadJoin(_Strict):
+    key: str = "wt_mc_id"  # matched case-sensitively against links.mc_id
+    # strip_numeric_suffix: a lead tag with no exact match is also tried with a
+    # trailing _NNNNN (5-7 digits) removed on both sides; none: exact only.
+    fallback: str | None = "strip_numeric_suffix"
+
+    @field_validator("key")
+    @classmethod
+    def _key(cls, v: str) -> str:
+        if v != "wt_mc_id":
+            raise ValueError("only 'wt_mc_id' is supported as the join key")
+        return v
+
+    @field_validator("fallback")
+    @classmethod
+    def _fallback(cls, v: str | None) -> str | None:
+        if v not in (None, "none", "strip_numeric_suffix"):
+            raise ValueError("fallback must be strip_numeric_suffix or none")
+        return None if v == "none" else v
+
+
+class LeadsConfig(_Strict):
+    """Aggregated lead counts per campaign tag, joined to links.mc_id (pathcrawl leads)."""
+
+    files: list[LeadFile] = []
+    join: LeadJoin = LeadJoin()
+    allocation: str = "even_split_across_source_pages"
+    # report.md rolls tags with fewer leads than this into one line
+    min_cell: int = Field(5, ge=1)
+
+    @field_validator("allocation")
+    @classmethod
+    def _allocation(cls, v: str) -> str:
+        if v != "even_split_across_source_pages":
+            raise ValueError("only 'even_split_across_source_pages' is supported")
+        return v
+
+
+class HealthConfig(_Strict):
+    """Website health view (pathcrawl/health.py)."""
+
+    # Click depth is counted from here. Default: the campaign's first entry link.
+    home_url: str | None = None
+    # AI crawlers whose robots.txt rules are recorded. Default: health.AI_CRAWLERS.
+    ai_crawlers: list[str] = []
+    # Fetch robots.txt, llms.txt and sitemaps per host at the end of a crawl.
+    check_site_files: bool = True
+
+
 class Config(_Strict):
     client: ClientConfig
     scope: ScopeConfig
     win: WinConfig
     campaigns: list[CampaignConfig] = Field(min_length=1)
     crawl: CrawlConfig = CrawlConfig()
+    leads: LeadsConfig = LeadsConfig()
+    health: HealthConfig = HealthConfig()
 
     @model_validator(mode="after")
     def _check_campaigns(self) -> Config:
@@ -336,6 +454,12 @@ def config_warnings(config: Config) -> list[str]:
                 f"win pattern {p!r} is on host {host!r}, which is not in scope.allowed_domains, "
                 "so the crawl can never reach it"
             )
+
+    for k in config.win.known_pages:
+        if host_of(k.url) not in config.scope.allowed_domains:
+            warnings.append(f"win known page {k.url!r} is not on an allowed domain, so no crawled link can reach it")
+        if config.win.excluded(k.url):
+            warnings.append(f"win known page {k.url!r} matches win.exclude_patterns, so it is not a win")
 
     for c in config.campaigns:
         seen: dict[str, str] = {}

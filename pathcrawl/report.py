@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,6 +31,11 @@ from pathcrawl.coverage import (
     write_page_entities_csv,
 )
 from pathcrawl.graph import ALL_LINKS, CONTENT_ONLY, MODES, Analysis, distances_to_win, edge_counts, mode_view
+from pathcrawl.dead import dead_annotations, dead_links, dead_pages, dead_section
+from pathcrawl.dead import write_csv as write_dead_csv
+from pathcrawl.health import health_annotations, health_section, page_health
+from pathcrawl.health import write_csv as write_health_csv
+from pathcrawl.leads import lead_annotations, lead_section
 
 DEFINITIONS = {
     "click": "Following one link. A path of N clicks visits N+1 pages.",
@@ -240,8 +246,11 @@ def win_pages(run) -> list[dict]:
         reason = None
         if not fetched:
             reason = NOT_FETCHED_REASONS.get(status) or (row["error"] if row and row["error"] else status)
+            if status is None and run.graph.in_degree(n) == 0:
+                reason = "listed in win.known_pages; no crawled page links to it"
         out.append({
             "url": n,
+            "win_type": d.get("win_type"),
             "win_source": d["win_source"],
             "status": status,
             "fetched": fetched,
@@ -270,11 +279,41 @@ ROLE_COLORS = {
     "win": (44, 160, 44),        # green
     "crawled": (150, 150, 150),  # grey
     "uncrawled": (255, 160, 60), # orange
+    "external": (10, 102, 194),  # LinkedIn-ish blue: posts collected by hand
 }
 TOP_HUBS = 10
 
 
-def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, seed: int = 42) -> nx.DiGraph:
+@dataclass
+class Annotations:
+    """Extra node and edge attributes (lead counts, dead pages, health) carried
+    into the GEXF files and report.json. Every node or edge gets each attribute,
+    using the default where nothing was recorded, so Gephi sees one type per column."""
+
+    node_defaults: dict[str, object] = field(default_factory=dict)
+    nodes: dict[str, dict[str, object]] = field(default_factory=dict)
+    edge_defaults: dict[str, object] = field(default_factory=dict)
+    edges: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
+
+    def add_nodes(self, defaults: dict[str, object], values: dict[str, dict[str, object]]) -> None:
+        self.node_defaults.update(defaults)
+        for n, d in values.items():
+            self.nodes.setdefault(n, {}).update(d)
+
+    def add_edges(self, defaults: dict[str, object], values: dict[tuple[str, str], dict[str, object]]) -> None:
+        self.edge_defaults.update(defaults)
+        for e, d in values.items():
+            self.edges.setdefault(e, {}).update(d)
+
+    def node(self, n: str) -> dict[str, object]:
+        return {**self.node_defaults, **self.nodes.get(n, {})}
+
+    def edge(self, u: str, v: str) -> dict[str, object]:
+        return {**self.edge_defaults, **self.edges.get((u, v), {})}
+
+
+def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, seed: int = 42,
+               annotations: Annotations | None = None) -> nx.DiGraph:
     """A copy of the graph laid out for Gephi.
 
     Positions come from a weighted spring layout (content links pull harder
@@ -297,6 +336,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             content_link=content,
             operator=bool(d["operator"]),
             weight=1.0 if content or d["operator"] else 0.2,
+            **(annotations.edge(u, v) if annotations else {}),
         )
     keep = set(out) if content_only else set(g)
     keep |= {n for n in g if n in entry_urls or g.nodes[n]["win"]}
@@ -304,6 +344,8 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
 
     def role(n):
         d = g.nodes[n]
+        if d.get("external"):
+            return "external"
         if n in entry_urls:
             return "entry"
         if d["win"]:
@@ -322,13 +364,16 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
         red, green, blue = ROLE_COLORS[r]
         x, y = (float(v) for v in layout[n])
         out.nodes[n].update(
-            label=(c.title if c and c.title else n) if (r in ("entry", "win") or n in hubs) else "",
+            label=(c.title if c and c.title else n) if (r in ("entry", "win", "external") or n in hubs) else "",
             role=r,
             in_degree=indeg[n],
             title=(c.title or "") if c else "",
             section=c.section if c else "",
             page_type=c.page_type if c else "",
             status=g.nodes[n].get("status") or "",
+            win_type=g.nodes[n].get("win_type") or "",
+            external=bool(g.nodes[n].get("external")),
+            **(annotations.node(n) if annotations else {}),
             viz={
                 "color": {"r": red, "g": green, "b": blue, "a": 1.0},
                 "size": round(4 + 36 * (indeg[n] / max_in) ** 0.5, 2),
@@ -360,12 +405,16 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     add("")
     add(f"> {headline(analysis, win_name)}")
     add("")
+    def type_note(w) -> str:
+        return f" ({w['win_type']})" if w.get("win_type") and w["win_type"] != win_name else ""
+
     for w in win_pages(run):
         if w["fetched"]:
             form = {True: "form found", False: "form not rendered", None: "form not checked"}[w["form_present"]]
-            add(f"- Win page {w['url']}: loaded ({form}).")
+            add(f"- Win page {w['url']}{type_note(w)}: loaded ({form}).")
         else:
-            add(f"- Win page {w['url']}: win page not fetched: {w['not_fetched_reason']}. It was matched by URL, "
+            add(f"- Win page {w['url']}{type_note(w)}: win page not fetched: {w['not_fetched_reason']}. "
+                f"It was matched by URL, "
                 f"so the link to it ({w['linked_from']} page{'s' if w['linked_from'] != 1 else ''} link here) "
                 "is confirmed, but the form itself was not checked.")
     misses = near_misses(run)
@@ -504,6 +553,61 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
         add(f"- **{term}**: {text}")
     add("")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- health
+
+
+def health_home(run) -> str | None:
+    """The page click depth is counted from: health.home_url, else the first entry link."""
+    if run.config.health.home_url:
+        return run.store.resolve(run.config.scope.normalize(run.config.health.home_url) or run.config.health.home_url)
+    return run.entries[0].url if run.entries else None
+
+
+# --------------------------------------------------------------------------- external seeds
+
+
+def external_seed_rows(run) -> list[dict]:
+    store, g = run.store, run.graph
+    rows = []
+    for p in store.db.execute("SELECT url, title, channel, post_date_derived FROM pages WHERE status = 'external' ORDER BY url"):
+        links = store.db.execute("SELECT href, url, mc_id, in_scope FROM links WHERE src = ? ORDER BY id", (p["url"],)).fetchall()
+        rows.append({
+            "url": p["url"], "title": p["title"], "channel": p["channel"], "post_date_derived": p["post_date_derived"],
+            "links": [{
+                "target": lk["url"], "mc_id": lk["mc_id"], "in_scope": bool(lk["in_scope"]),
+                "target_is_win": bool(lk["url"] in g and g.nodes[lk["url"]]["win"]),
+                "dead": bool(store.db.execute("SELECT 1 FROM pages WHERE url = ? AND is_dead = 1",
+                                              (store.resolve(lk["url"]) if lk["url"] else "",)).fetchone()),
+                "target_status": g.nodes[lk["url"]].get("status") if lk["url"] in g else None,
+            } for lk in links],
+        })
+    return rows
+
+
+def external_seed_section(run, short) -> list[str]:
+    meta = run.store.meta("external_seeds") or {}
+    rows = external_seed_rows(run)
+    L = ["## External entry points", ""]
+    L.append(f"{len(rows)} posts collected by hand ({Path(meta.get('file', '')).name}), never crawled. "
+             f"{len(meta.get('skipped_seeds', []))} were skipped as already listed (ad URLs or entry links) and "
+             f"{meta.get('duplicate_rows', 0)} duplicate rows dropped. {len(meta.get('new_entries', []))} landing "
+             f"pages became entry links; {len(meta.get('existing_entries', []))} already were.")
+    L.append("")
+    L.append("| post | date | lands on | tag |")
+    L.append("|---|---|---|---|")
+    for r in rows:
+        title = (r["title"] or r["url"]).replace("|", "/")[:70]
+        if not r["links"]:
+            L.append(f"| {title} | {r['post_date_derived'] or '-'} | (no landing page) | - |")
+        for lk in r["links"]:
+            note = (" (win)" if lk["target_is_win"] else " (dead page)" if lk["dead"]
+                    else "" if lk["in_scope"] else " (outside the crawl)")
+            L.append(f"| {title} | {r['post_date_derived'] or '-'} | {short(lk['target']) if lk['target'] else '-'}{note} "
+                     f"| {lk['mc_id'] or '-'} |")
+    L.append("")
+    return L
 
 
 # --------------------------------------------------------------------------- entities
@@ -645,15 +749,48 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     entity_rows = store.page_entities()
     if entity_rows:
         extra += entity_sections(run, entity_rows, categories, report, paths, out, short)
+    annotations = Annotations()
+    lead_nodes, lead_edges = lead_annotations(store, run.graph)
+    if lead_nodes or store.meta("leads"):
+        annotations.add_nodes({"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0}, lead_nodes)
+        annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
+        extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
+        report["leads"] = {k: v for k, v in (store.meta("leads") or {}).items() if k not in ("tags", "conversion_pages")}
+    dead_nodes, dead_edges = dead_annotations(store)
+    annotations.add_nodes({"is_dead": False, "dead_reason": "", "inbound_dead_links": 0, "dead_inbound_pages": 0,
+                           "dead_inbound_body_links": 0}, dead_nodes)
+    annotations.add_edges({"to_dead": False}, dead_edges)
+    extra += dead_section(store, short)
+    paths[f"{run.config.client.slug}_dead_pages.csv"] = out / f"{run.config.client.slug}_dead_pages.csv"
+    write_dead_csv(dead_links(store), dead_pages(store), paths[f"{run.config.client.slug}_dead_pages.csv"])
+    report["dead_pages"] = {"count": len(dead_nodes), "pages": dead_nodes}
+    home = health_home(run)
+    health_rows = page_health(run, categories, home)
+    extra_recorded = bool(store.db.execute("SELECT 1 FROM pages WHERE og_properties IS NOT NULL LIMIT 1").fetchone())
+    site_signals = store.meta("site_signals") or {}
+    health_md, health_summary = health_section(health_rows, home, site_signals, short, extra_recorded)
+    paths[f"{run.config.client.slug}_site_health.csv"] = out / f"{run.config.client.slug}_site_health.csv"
+    write_health_csv(health_rows, paths[f"{run.config.client.slug}_site_health.csv"])
+    annotations.add_nodes({"has_structured_data": False, "js_dependent": False, "clicks_from_home_body_links": -1,
+                           "clicks_from_home_all_links": -1}, health_annotations(health_rows))
+    report["health"] = {"home_url": home, "summary": health_summary, "site_signals": site_signals}
+    if store.meta("external_seeds"):
+        extra += external_seed_section(run, short)
+        report["external_seeds"] = external_seed_rows(run)
     findings = site_findings(store, categories, [w["url"] for w in report["win_pages"]],
                              [m["url"] for m in report["win_near_misses"]], entity_rows)
     report["site_findings"] = findings
     extra += recommendations_markdown(findings, run.config.win.name)
+    extra += health_md
+    if annotations.node_defaults:
+        report["nodes"] = {n: annotations.node(n) for n in sorted(run.graph)}
+    if annotations.edge_defaults:
+        report["edges"] = [{"src": u, "dst": v, **d} for (u, v), d in sorted(annotations.edges.items())]
     paths["report.json"].write_text(json.dumps(report, indent=2, default=lambda v: list(v)), encoding="utf-8")
     paths["report.md"].write_text(markdown_report(run, analysis, summary, mermaid, short, extra), encoding="utf-8")
     paths["paths.mmd"].write_text(mermaid, encoding="utf-8")
     nx.write_graphml(graphml_graph(run.graph, categories), paths["graph.graphml"])
     write_csv(categories, paths["categories.csv"])
     for name, content_only in (("graph.gexf", False), ("graph_content_only.gexf", True)):
-        nx.write_gexf(gexf_graph(run.graph, run.entries, categories, content_only), paths[name])
+        nx.write_gexf(gexf_graph(run.graph, run.entries, categories, content_only, annotations=annotations), paths[name])
     return paths

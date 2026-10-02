@@ -14,6 +14,7 @@ Tables:
 - ``links``: every outbound link found on a page, in scope or not.
 - ``operator_actions``: every decision the operator made, for the audit trail.
 - ``page_entities``: the taxonomy entities each page mentions (``pathcrawl.entities``).
+- ``lead_attribution``: lead counts per tag allocated to the pages carrying it (``pathcrawl.leads``).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE TABLE IF NOT EXISTS pages (
     url TEXT PRIMARY KEY,
     requested_url TEXT,
-    status TEXT NOT NULL,             -- ok, http_error, skipped, robots, offsite, not_fetched
+    status TEXT NOT NULL,             -- ok, http_error, skipped, robots, offsite, not_fetched, external
     depth INTEGER,
     http_status INTEGER,
     load_ms INTEGER,
@@ -74,7 +75,8 @@ CREATE TABLE IF NOT EXISTS links (
     text TEXT,
     region TEXT,
     in_scope INTEGER NOT NULL,
-    operator INTEGER NOT NULL DEFAULT 0
+    operator INTEGER NOT NULL DEFAULT 0,
+    mc_id TEXT                        -- campaign tag from the raw href (scope.capture_params)
 );
 CREATE INDEX IF NOT EXISTS links_src ON links(src);
 CREATE TABLE IF NOT EXISTS operator_actions (
@@ -85,6 +87,18 @@ CREATE TABLE IF NOT EXISTS operator_actions (
     action TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS lead_attribution (
+    src TEXT NOT NULL,                -- the page whose links carry the tag
+    mc_id TEXT NOT NULL,              -- the link tag(s) joined
+    lead_tag TEXT NOT NULL,           -- the tag as it appears in the lead file
+    join_type TEXT NOT NULL,          -- exact or fallback
+    targets TEXT,                     -- space-separated link targets
+    region TEXT,                      -- comma-separated link regions
+    tag_leads_total REAL NOT NULL,
+    tag_source_pages INTEGER NOT NULL,
+    leads_allocated REAL NOT NULL,
+    attribution TEXT NOT NULL         -- exact (one source page) or shared
+);
 CREATE TABLE IF NOT EXISTS page_entities (
     url TEXT NOT NULL,
     entity_type TEXT NOT NULL,        -- Industry, Segment, Service, Topic, Customer
@@ -94,6 +108,22 @@ CREATE TABLE IF NOT EXISTS page_entities (
     PRIMARY KEY (url, entity_type, entity)
 );
 """
+
+# Columns added after the first release, so databases from older runs are
+# upgraded in place when opened: (table, column, SQL type).
+MIGRATIONS = [
+    ("links", "mc_id", "TEXT"),
+    ("pages", "channel", "TEXT"),             # external seeds: e.g. linkedin
+    ("pages", "post_date_derived", "TEXT"),   # external seeds: date from the post ID
+    ("pages", "is_dead", "INTEGER"),          # 404/410 or a soft 404 (pathcrawl.extract.detect_dead)
+    ("pages", "dead_reason", "TEXT"),
+    # machine-readability signals (website health); NULL = not recorded by this crawl
+    ("pages", "microdata_types", "TEXT"),     # JSON list
+    ("pages", "rdfa_types", "TEXT"),          # JSON list
+    ("pages", "og_properties", "TEXT"),       # JSON list
+    ("pages", "hreflang", "TEXT"),            # JSON list
+    ("pages", "robots_meta", "TEXT"),
+]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
 EXPLORED_STATUSES = ("ok", "http_error")
@@ -126,6 +156,13 @@ class PageRecord:
     win: bool = False
     win_source: str | None = None
     error: str | None = None
+    is_dead: bool | None = None
+    dead_reason: str | None = None
+    microdata_types: list[str] | None = None
+    rdfa_types: list[str] | None = None
+    og_properties: list[str] | None = None
+    hreflang: list[str] | None = None
+    robots_meta: str | None = None
 
 
 @dataclass
@@ -136,6 +173,7 @@ class LinkRecord:
     region: str
     in_scope: bool
     operator: bool = False
+    mc_id: str | None = None
 
 
 @dataclass
@@ -151,7 +189,14 @@ class Store:
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
+
+    def _migrate(self) -> None:
+        for table, column, sql_type in MIGRATIONS:
+            existing = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
     def close(self) -> None:
         self.db.close()
@@ -235,8 +280,9 @@ class Store:
                 """INSERT OR REPLACE INTO pages(url, requested_url, status, depth, http_status, load_ms,
                    redirect_chain, canonical, title, meta_description, headings, body_text, form_present,
                    jsonld_types, raw_text_len, rendered_text_len, js_dependent, screenshot, win, win_source,
-                   error, crawled_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   error, crawled_at, is_dead, dead_reason, microdata_types, rdfa_types, og_properties,
+                   hreflang, robots_meta)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     page.url, page.requested_url, page.status, page.depth, page.http_status, page.load_ms,
                     json.dumps(page.redirect_chain), page.canonical, page.title, page.meta_description,
@@ -246,12 +292,17 @@ class Store:
                     page.raw_text_len, page.rendered_text_len,
                     None if page.js_dependent is None else int(page.js_dependent),
                     page.screenshot, int(page.win), page.win_source, page.error, now(),
+                    None if page.is_dead is None else int(page.is_dead), page.dead_reason,
+                    *(None if v is None else json.dumps(v)
+                      for v in (page.microdata_types, page.rdfa_types, page.og_properties, page.hreflang)),
+                    page.robots_meta,
                 ),
             )
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))
             self.db.executemany(
-                "INSERT INTO links(src, href, url, text, region, in_scope, operator) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator)) for lk in links],
+                "INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator), lk.mc_id)
+                 for lk in links],
             )
             for alias in {page.url, page.requested_url, *page.redirect_chain} - {None}:
                 self.db.execute("INSERT OR REPLACE INTO aliases(url, final_url) VALUES (?, ?)", (alias, page.url))
@@ -259,6 +310,11 @@ class Store:
                 self.db.execute("UPDATE queue SET state = 'done' WHERE url = ?", (queue_url,))
             # The final URL may itself be queued (reached directly elsewhere); it is done now.
             self.db.execute("UPDATE queue SET state = 'done' WHERE url = ? AND state = 'pending'", (page.url,))
+
+    def set_external(self, url: str, channel: str | None, post_date: str | None) -> None:
+        with self.db:
+            self.db.execute("UPDATE pages SET channel = ?, post_date_derived = ? WHERE url = ?",
+                            (channel, post_date, url))
 
     def add_alias(self, url: str, final_url: str) -> None:
         """``url`` turned out to be another spelling of an already-crawled page."""
@@ -314,4 +370,21 @@ class Store:
     def page_entities(self) -> list[sqlite3.Row]:
         return self.db.execute(
             "SELECT url, entity_type, entity, score, evidence FROM page_entities ORDER BY url, entity_type, entity"
+        ).fetchall()
+
+    # ------------------------------------------------------------------ leads
+
+    def replace_lead_attribution(self, rows) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM lead_attribution")
+            self.db.executemany(
+                """INSERT INTO lead_attribution(src, mc_id, lead_tag, join_type, targets, region, tag_leads_total,
+                   tag_source_pages, leads_allocated, attribution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(r.src, r.mc_id, r.lead_tag, r.join, r.targets, r.region, r.tag_leads_total, r.tag_source_pages,
+                  r.leads_allocated, r.attribution) for r in rows],
+            )
+
+    def lead_attribution(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM lead_attribution ORDER BY leads_allocated DESC, src, mc_id"
         ).fetchall()

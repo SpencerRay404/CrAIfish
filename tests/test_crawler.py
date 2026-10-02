@@ -306,6 +306,69 @@ def test_a_crash_is_recorded_as_paused_not_complete(make_site, tmp_path, monkeyp
     assert c.store.meta("status") == "quit"
 
 
+def test_campaign_tag_is_stored_on_the_link(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html('<main><a href="/win.html?WT.mc_id=ONLINE_WEB_X_1">Talk</a></main>')),
+        "/win.html": WIN,
+    })
+    cfg = config_for(site, ["/start.html"])
+    cfg.scope.strip_query_params = ["WT.*"]
+    cfg.scope.capture_params = ["WT.mc_id"]
+    c, _ = crawl(cfg, tmp_path)
+    (link,) = list(c.store.links())
+    assert link["url"] == site.base + "/win.html" and link["mc_id"] == "ONLINE_WEB_X_1"
+
+
+def test_external_seed_landing_pages_are_crawled_as_entries(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html("<p>start</p>")),
+        "/from-post.html": (200, {}, html('<a href="/win.html">Talk</a>')),
+        "/win.html": WIN,
+    })
+    seeds = tmp_path / "seeds.csv"
+    seeds.write_text("seed_url,post_title,outbound_url_raw,outbound_resolved_url\n"
+                     f"https://www.linkedin.com/pulse/p/,Post,https://lnkd.in/x,{site.base}/from-post.html?WT.mc_id=T1\n")
+    cfg = config_for(site, ["/start.html"])
+    cfg.scope.strip_query_params = ["WT.*"]
+    cfg.scope.capture_params = ["WT.mc_id"]
+    cfg.campaigns[0].external_seeds = str(seeds)
+    (tmp_path / "run").mkdir()
+    c, status = crawl(cfg, tmp_path / "run")
+    assert status == "complete"
+    assert page_row(c, site.base + "/from-post.html")["status"] == "ok"
+    assert page_row(c, "https://www.linkedin.com/pulse/p")["status"] == "external"
+    assert [e["label"] for e in c.store.entries()] == ["start.html", "test: Post"]
+    assert "linkedin" not in " ".join(site.requests)
+
+
+def test_dead_pages_are_recorded(make_site, tmp_path):
+    site = make_site({
+        "/start.html": (200, {}, html('<a href="/soft.html">s</a><a href="/hard.html">h</a>')),
+        "/soft.html": (200, {}, html("<p>Sorry, this page no longer exists.</p>")),
+        "/hard.html": (404, {}, html("<p>missing</p>")),
+    })
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    assert (page_row(c, site.base + "/soft.html")["is_dead"], page_row(c, site.base + "/soft.html")["dead_reason"]) == \
+        (1, "page says 'this page no longer exists'")
+    assert page_row(c, site.base + "/hard.html")["dead_reason"] == "HTTP 404"
+    assert page_row(c, site.base + "/start.html")["is_dead"] == 0
+
+
+def test_health_signals_are_recorded(make_site, tmp_path):
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: GPTBot\nDisallow: /\n"),
+        "/llms.txt": (200, {"Content-Type": "text/plain"}, "# Test site\n"),
+        "/start.html": (200, {}, html('<div itemscope itemtype="https://schema.org/Product">p</div>',
+                                      head='<meta property="og:title" content="x"><meta name="robots" content="index">')),
+    })
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    row = page_row(c, site.base + "/start.html")
+    assert (row["og_properties"], row["microdata_types"], row["robots_meta"]) == ('["og:title"]', '["Product"]', "index")
+    signals = c.store.meta("site_signals")
+    h = signals[site.base.split("//")[1]]
+    assert h["robots_txt"] and h["llms_txt"] and h["ai_crawlers"]["GPTBot"]["allowed_home"] is False
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)

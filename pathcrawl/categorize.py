@@ -136,7 +136,7 @@ def categorize(store, g: nx.DiGraph, analysis: Analysis, locale_include: list[st
     rows = []
     for page in store.pages():
         url = page["url"]
-        if url not in g:
+        if url not in g or page["status"] == "external":
             continue
         jsonld = json.loads(page["jsonld_types"]) if page["jsonld_types"] else []
         headings = json.loads(page["headings"]) if page["headings"] else []

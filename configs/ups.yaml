@@ -30,7 +30,11 @@ scope:
   locale_exclude: []
   # WT.mc_id is UPS's campaign tracking code; stripping it makes every
   # "Talk With an Expert" link point at the same consultation page.
-  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk", "WT.*"]
+  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk", "WT.*",
+                       "msockid", "_gl", "gbraid", "wbraid"]
+  # WT.mc_id is stripped from page URLs above but kept on each link, so lead
+  # counts can be joined to the link that carried the tag (pathcrawl leads).
+  capture_params: ["WT.mc_id"]
   region_selectors:
     nav: []
     header: []
@@ -42,6 +46,22 @@ win:
   # suffix may change, hence the wildcard).
   url_patterns:
     - "https://solutions.ups.com/virtual-consultation-us-en*"
+  # Conversion pages on solutions.ups.com (robots.txt blocks the crawler there),
+  # added as win nodes without being fetched. Two were found only in the lead
+  # export: sbr-signup and the manufacturing white paper.
+  known_pages:
+    - {url: "https://solutions.ups.com/virtual-consultation-us-en-v4.html", type: "Virtual consultation"}
+    - {url: "https://solutions.ups.com/consumer-trends-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/preparing-for-peak-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/circular-economy-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/manufacturing-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/speed-and-smarts-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/sbr-signup-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/ussp-2605-gc-xxxx-manufacturingwhitepaper-mv_page.html", type: "White papers & reports"}
+  exclude_patterns:
+    - "https://solutions.ups.com/lpeditor/*"   # internal landing-page preview tool
+  # The lead export spells some pages in upper case (SBR signup).
+  match: "case_insensitive_path"
   require_form: false
 
 campaigns:
@@ -83,6 +103,26 @@ campaigns:
         url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/win-customer-loyalty-with-omnichannel-retail-strategies"
       - label: "Mastering omnichannel strategy (retail)"
         url: "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions/mastering-your-omnichannel-strategy-for-retail-growth"
+    # LinkedIn posts collected by hand (local file, not in the repo; template in
+    # data/templates/). Each post becomes an external node, and new UPS landing
+    # pages are added as entry links at crawl time.
+    external_seeds: "data/ups/linkedin_scrape.csv"
+
+# Aggregated lead counts per WT.mc_id (counts only; never the raw CRM export).
+# The file is local and not in the repo. pathcrawl leads / report join it to
+# links.mc_id.
+leads:
+  files:
+    - path: "data/ups/ups_lead_tags.csv"
+  join:
+    key: "wt_mc_id"
+    fallback: "strip_numeric_suffix"
+  allocation: "even_split_across_source_pages"
+  min_cell: 5
+
+# Website health view: click depth is counted from the US home page.
+health:
+  home_url: "https://www.ups.com/us/en/home"
 
 crawl:
   max_depth: 8
