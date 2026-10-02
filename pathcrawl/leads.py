@@ -355,20 +355,24 @@ def lead_section(store, g, min_cell: int, short) -> list[str]:
                      sorted(((t.lead_tag, t.leads) for t in unmatched), key=lambda kv: (-kv[1], kv[0])), min_cell)))
         L.append("")
 
-    wins = {n for n, d in g.nodes(data=True) if d["win"]}
-    linking: dict[str, bool] = {}
-    win_tags: set[str] = set()
-    for r in store.db.execute("SELECT src, url, mc_id FROM links WHERE url IS NOT NULL"):
-        if store.resolve(r["url"]) in wins and r["src"] in g and g.nodes[r["src"]]["explored"]:
-            linking[r["src"]] = linking.get(r["src"], False) or bool(r["mc_id"])
-            if r["mc_id"]:
-                win_tags.add(r["mc_id"])
-    untagged = sorted(p for p, tagged in linking.items() if not tagged)
-    L.append(f"- **Crawled pages linking to a win page:** {len(linking)}; {len(linking) - len(untagged)} carry a tag "
-             f"on that link." + (" Without a tag: " + ", ".join(short(p) for p in untagged[:20]) + "." if untagged else ""))
+    win_type = {n: d.get("win_type") or "win" for n, d in g.nodes(data=True) if d["win"]}
     with_leads = {lt for t in tags if t.join for lt in t.link_tags}
-    no_leads = sorted(win_tags - with_leads)
-    L.append(f"- **Tags on links to a win page:** {len(win_tags)}; with leads: {len(win_tags & with_leads)}, "
-             f"without leads in the lead file: {len(no_leads)}.")
+    types = sorted(set(win_type.values()))
+    for wtype in [None, *types] if len(types) > 1 else [None]:
+        wins = {n for n, t in win_type.items() if wtype is None or t == wtype}
+        linking: dict[str, bool] = {}
+        win_tags: set[str] = set()
+        for r in store.db.execute("SELECT src, url, mc_id FROM links WHERE url IS NOT NULL"):
+            if store.resolve(r["url"]) in wins and r["src"] in g and g.nodes[r["src"]]["explored"]:
+                linking[r["src"]] = linking.get(r["src"], False) or bool(r["mc_id"])
+                if r["mc_id"]:
+                    win_tags.add(r["mc_id"])
+        untagged = sorted(p for p, tagged in linking.items() if not tagged)
+        target = "a win page" if wtype is None else f"a {wtype} page"
+        L.append(f"- **Crawled pages linking to {target}:** {len(linking)}; {len(linking) - len(untagged)} carry a "
+                 "tag on that link." + (" Without a tag: " + ", ".join(short(p) for p in untagged[:20]) + "."
+                                        if untagged else "")
+                 + f" Tags on those links: {len(win_tags)}; with leads: {len(win_tags & with_leads)}, without leads "
+                 f"in the lead file: {len(win_tags - with_leads)}.")
     L.append("")
     return L

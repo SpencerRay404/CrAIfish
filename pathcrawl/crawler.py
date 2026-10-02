@@ -500,12 +500,16 @@ class Crawler:
             queue_url=url,
         )
 
+    def _win_source(self, url: str) -> str:
+        return "known" if self.config.win.known_page(url) else "pattern"
+
     def _process(self, url: str, depth: int) -> None:
         is_entry = self.store.is_entry(url)
         # A URL matching the win patterns is a win whether or not it can be loaded.
         url_win = self.config.win.url_matches(url)
         if not self.robots.allowed(url):
-            self._save_failed(url, depth, "robots", "disallowed by robots.txt", win=url_win, win_source="pattern")
+            self._save_failed(url, depth, "robots", "disallowed by robots.txt", win=url_win,
+                              win_source=self._win_source(url))
             self._log(depth, "robots", url, "skipped: disallowed by robots.txt"
                       + (" · win matched by URL, not loaded" if url_win else ""), win=url_win)
             return
@@ -514,7 +518,7 @@ class Crawler:
             # nothing past it to follow. (With require_form it is loaded to
             # check the form, but its links are still not followed.)
             self._save_failed(url, depth, NOT_FETCHED, "win page: matched by URL; the crawl stops at the win",
-                              win=True, win_source="pattern")
+                              win=True, win_source=self._win_source(url))
             self._log(depth, "win", url, "matched by URL; not loaded, links not followed", win=True)
             return
 
@@ -613,7 +617,7 @@ class Crawler:
         win_cfg = self.config.win
         url_win = win_cfg.url_matches(final)
         win = url_win and (data.form_present is not False or not win_cfg.require_form)
-        win_source = "pattern" if win else None
+        win_source = self._win_source(final) if win else None
         if decision and decision.action == MARK_WIN and not win:
             win, win_source = True, "operator"
         raw_len = self._raw_text_len(final)

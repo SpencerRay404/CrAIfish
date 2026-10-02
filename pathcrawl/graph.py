@@ -38,6 +38,7 @@ from dataclasses import asdict, dataclass, field
 import networkx as nx
 
 from pathcrawl.extract import BODY, CHROME_REGIONS
+from pathcrawl.normalize import normalize_url
 
 ALL_LINKS = "all_links"
 CONTENT_ONLY = "content_only"
@@ -518,12 +519,30 @@ def graph_from_store(store, win=None) -> tuple[nx.DiGraph, list[EntryPoint]]:
 
 
 def mark_pattern_wins(g: nx.DiGraph, win, form_missing: Iterable[str] = ()) -> None:
-    """Mark every node whose URL matches the win patterns as a win
-    (``win_source`` "pattern"), except loaded pages that lack a required form."""
+    """Mark wins from the config on the graph.
+
+    - Every node matching ``win.url_patterns`` or a ``win.known_pages`` entry
+      is a win (``win_source`` "pattern" or "known"), except loaded pages that
+      lack a required form.
+    - Known pages no crawled page links to are added as unlinked win nodes.
+    - A node matching ``win.exclude_patterns`` is never a pattern win.
+    - Every node gets ``win_type``: the known page's type, the win name for a
+      pattern win, "operator" for an operator-marked win, else None.
+    """
     form_missing = set(form_missing)
+    linked = {win.known_page(n).url for n in g if win.known_page(n) is not None}
+    for k in win.known_pages:
+        if k.url not in linked and not win.excluded(k.url):
+            g.add_node(normalize_url(k.url) or k.url, explored=False, win=False, win_source=None, status=None)
     for n, d in g.nodes(data=True):
-        if d["win"] or not win.url_matches(n):
-            continue
-        if win.require_form and n in form_missing:
-            continue
-        d["win"], d["win_source"] = True, "pattern"
+        d.setdefault("status", None)
+        if d["win"] and d["win_source"] != "operator" and win.excluded(n):
+            d["win"], d["win_source"] = False, None
+        if not d["win"] and win.url_matches(n) and not (win.require_form and n in form_missing):
+            d["win"], d["win_source"] = True, "known" if win.known_page(n) else "pattern"
+        if not d["win"]:
+            d["win_type"] = None
+        elif d["win_source"] == "operator":
+            d["win_type"] = "operator"
+        else:
+            d["win_type"] = win.win_type(n) or win.name

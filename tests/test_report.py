@@ -103,7 +103,7 @@ def test_write_report_files(tmp_path):
     assert data["headline"].startswith("Following content links only, both entry links")
     assert data["categories"]["pages_loaded"] == 9
     assert data["win_pages"] == [{
-        "url": FIXTURE_BASE + "win.html", "win_source": "pattern", "status": "not_fetched", "fetched": False,
+        "url": FIXTURE_BASE + "win.html", "win_type": "Contact sales", "win_source": "pattern", "status": "not_fetched", "fetched": False,
         "not_fetched_reason": "the crawl stops at the win, so it is not loaded", "form_present": None,
         "linked_from": 8,
     }]

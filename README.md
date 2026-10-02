@@ -398,6 +398,17 @@ the output directory `runs/<slug>/...`.
   pattern starting with `re:` is a Python regex that must match the whole
   URL. Patterns are matched against the normalized URL, which has a lowercase
   host, no fragment, and no stripped params.
+- **`known_pages`** (optional): further win pages, each with a conversion
+  `type`, e.g. `{url: ".../sbr-signup-ussp-page.html", type: "White papers &
+  reports"}`. They are wins even if robots.txt blocks them or no crawled page
+  links to them; unlinked ones are added as nodes. The report and graphs show
+  each win's type.
+- **`exclude_patterns`** (optional): globs for URLs that are never wins, such
+  as an internal preview tool. These override `url_patterns` and
+  `known_pages`.
+- **`match`** (`exact` or `case_insensitive_path`): with
+  `case_insensitive_path`, patterns, exclusions and known pages ignore path
+  case, and known pages also ignore the query.
 - **`form_selector`** (optional): a CSS selector that confirms the win form
   rendered on the page.
 - **`require_form`** (default `false`): when false, a URL match counts as a win

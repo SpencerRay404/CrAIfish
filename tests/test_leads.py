@@ -205,8 +205,8 @@ def test_leads_cli_and_report(tmp_path, lead_file):
     assert "TAG_OLD (8 leads): links point at" in section
     assert "TAG_AD_ONLY (6)" in section
     assert "TAG_TINY" not in md and "(other, <5 leads) ×1 (2)" in section  # rolled up below min_cell
-    assert "- **Crawled pages linking to a win page:** 5; 4 carry a tag on that link. Without a tag: /support." in section
-    assert "- **Tags on links to a win page:** 3; with leads: 2, without leads in the lead file: 1." in section
+    assert ("- **Crawled pages linking to a win page:** 5; 4 carry a tag on that link. Without a tag: /support. "
+            "Tags on those links: 3; with leads: 2, without leads in the lead file: 1.") in section
 
     data = json.loads((run / "report.json").read_text())
     assert data["nodes"][B + "retail"]["leads_origin"] == 12 and data["nodes"][B + "retail"]["leads_exact"] == 12

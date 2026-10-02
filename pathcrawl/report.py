@@ -242,8 +242,11 @@ def win_pages(run) -> list[dict]:
         reason = None
         if not fetched:
             reason = NOT_FETCHED_REASONS.get(status) or (row["error"] if row and row["error"] else status)
+            if status is None and run.graph.in_degree(n) == 0:
+                reason = "listed in win.known_pages; no crawled page links to it"
         out.append({
             "url": n,
+            "win_type": d.get("win_type"),
             "win_source": d["win_source"],
             "status": status,
             "fetched": fetched,
@@ -361,6 +364,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             section=c.section if c else "",
             page_type=c.page_type if c else "",
             status=g.nodes[n].get("status") or "",
+            win_type=g.nodes[n].get("win_type") or "",
             **(annotations.node(n) if annotations else {}),
             viz={
                 "color": {"r": red, "g": green, "b": blue, "a": 1.0},
@@ -393,12 +397,16 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     add("")
     add(f"> {headline(analysis, win_name)}")
     add("")
+    def type_note(w) -> str:
+        return f" ({w['win_type']})" if w.get("win_type") and w["win_type"] != win_name else ""
+
     for w in win_pages(run):
         if w["fetched"]:
             form = {True: "form found", False: "form not rendered", None: "form not checked"}[w["form_present"]]
-            add(f"- Win page {w['url']}: loaded ({form}).")
+            add(f"- Win page {w['url']}{type_note(w)}: loaded ({form}).")
         else:
-            add(f"- Win page {w['url']}: win page not fetched: {w['not_fetched_reason']}. It was matched by URL, "
+            add(f"- Win page {w['url']}{type_note(w)}: win page not fetched: {w['not_fetched_reason']}. "
+                f"It was matched by URL, "
                 f"so the link to it ({w['linked_from']} page{'s' if w['linked_from'] != 1 else ''} link here) "
                 "is confirmed, but the form itself was not checked.")
     misses = near_misses(run)

@@ -46,6 +46,22 @@ win:
   # suffix may change, hence the wildcard).
   url_patterns:
     - "https://solutions.ups.com/virtual-consultation-us-en*"
+  # Conversion pages on solutions.ups.com (robots.txt blocks the crawler there),
+  # added as win nodes without being fetched. Two were found only in the lead
+  # export: sbr-signup and the manufacturing white paper.
+  known_pages:
+    - {url: "https://solutions.ups.com/virtual-consultation-us-en-v4.html", type: "Virtual consultation"}
+    - {url: "https://solutions.ups.com/consumer-trends-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/preparing-for-peak-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/circular-economy-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/manufacturing-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/speed-and-smarts-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/sbr-signup-ussp-page.html", type: "White papers & reports"}
+    - {url: "https://solutions.ups.com/ussp-2605-gc-xxxx-manufacturingwhitepaper-mv_page.html", type: "White papers & reports"}
+  exclude_patterns:
+    - "https://solutions.ups.com/lpeditor/*"   # internal landing-page preview tool
+  # The lead export spells some pages in upper case (SBR signup).
+  match: "case_insensitive_path"
   require_form: false
 
 campaigns:
