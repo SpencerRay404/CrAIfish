@@ -607,7 +607,7 @@ class Crawler:
 
             links = [
                 LinkRecord(lk.href, lk.url, lk.text, lk.region, bool(lk.url and self.scope.in_scope(lk.url)),
-                           mc_id=lk.mc_id)
+                           mc_id=lk.mc_id, params=lk.params)
                 for lk in extract_links(visit.html, final, self.scope.strip_query_params,
                                         self.scope.region_selectors.model_dump(), self.scope.capture_params)
             ]
@@ -656,7 +656,7 @@ class Crawler:
             http_status=visit.http_status,
             load_ms=visit.load_ms,
             redirect_chain=[c for c in (self.scope.normalize(u) for u in visit.redirect_chain) if c],
-            canonical=data.canonical,
+            canonical=self.scope.normalize(data.canonical) if data.canonical else None,
             title=data.title,
             meta_description=data.meta_description,
             headings=data.headings,

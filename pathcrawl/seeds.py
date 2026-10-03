@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from pathcrawl.normalize import captured_param
+from pathcrawl.normalize import captured_param, captured_params
 
 EXTERNAL = "external"
 ACTIVITY_ID = re.compile(r"activity[-:](\d{19})")
@@ -96,6 +96,7 @@ class SeedLink:
     mc_id: str | None
     anchor_text: str = ""
     link_order: str = ""
+    params: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -181,7 +182,9 @@ def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list
             dupes += 1
             continue
         pairs.add((seed, key))
-        mc_id = captured_param(resolved, scope.capture_params) or captured_param(raw, scope.capture_params)
+        first = scope.capture_params[:1]
+        mc_id = captured_param(resolved, first) or captured_param(raw, first)
+        params = captured_params(raw, scope.capture_params) | captured_params(resolved, scope.capture_params)
         if not (resolved or raw):
             link = SeedLink(seed, "", None, None, "none", False, None)
         elif is_post(resolved or raw):
@@ -191,6 +194,7 @@ def plan(rows: list[dict[str, str]], scope, ad_urls: list[str], entry_urls: list
             in_scope = bool(target and scope.in_scope(target))
             link = SeedLink(seed, raw, resolved, target, "page" if in_scope else "offsite", in_scope, mc_id)
         link.anchor_text, link.link_order = r.get("anchor_text", ""), r.get("link_order", "")
+        link.params = params
         s.links.append(link)
 
     # a post that another post links to becomes a seed itself
@@ -250,7 +254,8 @@ def ingest(store, config, campaign, path: Path) -> SeedIngest:
     for s in result.seeds:
         links = [
             LinkRecord(href=lk.raw or lk.resolved, url=lk.target if lk.kind != "none" else None,
-                       text=lk.anchor_text, region=EXTERNAL, in_scope=lk.in_scope, mc_id=lk.mc_id)
+                       text=lk.anchor_text, region=EXTERNAL, in_scope=lk.in_scope, mc_id=lk.mc_id,
+                       params=lk.params or None)
             for lk in s.links if lk.kind != "none"
         ]
         store.save_page(PageRecord(url=s.url, status=EXTERNAL, title=s.title or None), links)

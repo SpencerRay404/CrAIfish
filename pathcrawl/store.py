@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS page_entities (
 # upgraded in place when opened: (table, column, SQL type).
 MIGRATIONS = [
     ("links", "mc_id", "TEXT"),
+    ("links", "params", "TEXT"),              # JSON {name: value} of every captured param (scope.capture_params)
     ("pages", "channel", "TEXT"),             # external seeds: e.g. linkedin
     ("pages", "post_date_derived", "TEXT"),   # external seeds: date from the post ID
     ("pages", "is_dead", "INTEGER"),          # 404/410 or a soft 404 (pathcrawl.extract.detect_dead)
@@ -174,6 +175,7 @@ class LinkRecord:
     in_scope: bool
     operator: bool = False
     mc_id: str | None = None
+    params: dict[str, str] | None = None
 
 
 @dataclass
@@ -300,8 +302,10 @@ class Store:
             )
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))
             self.db.executemany(
-                "INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator), lk.mc_id)
+                """INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id, params)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator), lk.mc_id,
+                  json.dumps(lk.params) if lk.params else None)
                  for lk in links],
             )
             for alias in {page.url, page.requested_url, *page.redirect_chain} - {None}:

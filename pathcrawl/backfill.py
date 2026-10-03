@@ -17,7 +17,9 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from pathcrawl.normalize import captured_param
+import json
+
+from pathcrawl.normalize import captured_params
 
 
 @dataclass
@@ -36,10 +38,22 @@ def backfill_links(store, scope) -> LinkBackfill:
     out = LinkBackfill()
     out.duplicate_pages = duplicate_pages(store, scope)
     out.links_renormalized = merge_duplicate_pages(store, scope, out.duplicate_pages)
+    if out.duplicate_pages:
+        previous = store.meta("merged_pages", []) or []
+        store.set_meta(merged_pages=previous + out.duplicate_pages)
     rows = store.db.execute("SELECT id, href FROM links").fetchall()
-    updates = [(captured_param(r["href"], scope.capture_params), r["id"]) for r in rows]
+    first = scope.capture_params[0] if scope.capture_params else ""
+    updates = []
+    for r in rows:
+        found = captured_params(r["href"], scope.capture_params)
+        updates.append((found.get(first), json.dumps(found) if found else None, r["id"]))
     with store.db:
-        store.db.executemany("UPDATE links SET mc_id = ? WHERE id = ?", updates)
+        store.db.executemany("UPDATE links SET mc_id = ?, params = ? WHERE id = ?", updates)
+        # canonical URLs are stored normalized, like every other URL
+        for r in store.db.execute("SELECT url, canonical FROM pages WHERE canonical IS NOT NULL").fetchall():
+            new = scope.normalize(r["canonical"])
+            if new and new != r["canonical"]:
+                store.db.execute("UPDATE pages SET canonical = ? WHERE url = ?", (new, r["url"]))
     out.links = len(rows)
     stats = store.db.execute(
         "SELECT COUNT(*), COUNT(DISTINCT mc_id), COUNT(DISTINCT src) FROM links WHERE mc_id IS NOT NULL"

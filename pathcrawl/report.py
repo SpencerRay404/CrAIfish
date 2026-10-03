@@ -405,6 +405,11 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     add("")
     add(f"> {headline(analysis, win_name)}")
     add("")
+    merged = store.meta("merged_pages", []) or []
+    if merged:
+        add(f"- {sum(1 for g in merged if len(g) > 1)} pages were stored under more than one URL (differing only "
+            f"by tracking parameters) and merged; {sum(1 for g in merged if len(g) == 1)} renamed to their "
+            "clean URL (`pathcrawl backfill-links`).")
     def type_note(w) -> str:
         return f" ({w['win_type']})" if w.get("win_type") and w["win_type"] != win_name else ""
 
@@ -779,7 +784,11 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
             "max_depth": run.config.crawl.max_depth,
             "max_pages": run.config.crawl.max_pages,
         },
-        "entry_links": [dict(r) for r in store.entries()],
+        "entry_links": [{**dict(r), "requested_url": run.config.scope.normalize(r["requested_url"]) or r["requested_url"]}
+                        for r in store.entries()],
+        # counts only: the old URLs carried tracking params and stay in crawl.db
+        "merged_pages": {"merged": sum(1 for g in store.meta("merged_pages", []) or [] if len(g) > 1),
+                         "renamed": sum(1 for g in store.meta("merged_pages", []) or [] if len(g) == 1)},
         "headline": headline(analysis, run.config.win.name),
         "analysis": analysis.to_dict(),
         "categories": summary,

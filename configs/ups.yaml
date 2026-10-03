@@ -30,11 +30,13 @@ scope:
   locale_exclude: []
   # WT.mc_id is UPS's campaign tracking code; stripping it makes every
   # "Talk With an Expert" link point at the same consultation page.
-  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk", "WT.*",
-                       "msockid", "_gl", "gbraid", "wbraid"]
-  # WT.mc_id is stripped from page URLs above but kept on each link, so lead
-  # counts can be joined to the link that carried the tag (pathcrawl leads).
-  capture_params: ["WT.mc_id"]
+  # Tracking params never identify a page. campaign_id is one too: pages that
+  # differ only by it are the same page.
+  strip_query_params: ["utm_*", "gclid", "gclsrc", "gbraid", "wbraid", "gad_source", "gad_campaignid",
+                       "fbclid", "mkt_tok", "msockid", "_gl", "li_fat_id", "trk", "WT.*", "campaign_id"]
+  # Stripped from page URLs above but kept on each link (links.params). The
+  # first, WT.mc_id, is also links.mc_id, the key lead counts join on.
+  capture_params: ["WT.mc_id", "campaign_id"]
   region_selectors:
     nav: []
     header: []

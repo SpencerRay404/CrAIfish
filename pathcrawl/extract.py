@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
-from pathcrawl.normalize import captured_param, normalize_url
+from pathcrawl.normalize import captured_params, normalize_url
 
 NAV, HEADER, FOOTER, BODY = "nav", "header", "footer", "body"
 # Site chrome: links here are excluded in "content links only" mode.
@@ -33,7 +33,8 @@ class Link:
     url: str | None  # normalized absolute URL, or None if not crawlable (mailto:, etc.)
     text: str  # anchor text, falling back to aria-label / title / image alt
     region: str  # nav, header, footer or body
-    mc_id: str | None = None  # campaign tag from the raw href (scope.capture_params)
+    mc_id: str | None = None  # the lead-join tag: the first of scope.capture_params, from the raw href
+    params: dict[str, str] | None = None  # every captured param present on the href
 
 
 def _anchor_text(a: Tag) -> str:
@@ -115,7 +116,8 @@ def extract_links(
                 url=normalize_url(href, base=base, strip_params=strip),
                 text=_anchor_text(a),
                 region=link_region(a, custom),
-                mc_id=captured_param(href, capture_params),
+                mc_id=(found := captured_params(href, capture_params)).get(next(iter(capture_params), ""), None),
+                params=found or None,
             )
         )
     return links
