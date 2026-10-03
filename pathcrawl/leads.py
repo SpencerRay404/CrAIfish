@@ -23,6 +23,7 @@ rows, and report.md rolls tags under ``leads.min_cell`` into one line.
 from __future__ import annotations
 
 import csv
+import math
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -140,8 +141,16 @@ class Attribution:
     region: str  # comma-separated regions the tagged links sit in
     tag_leads_total: float
     tag_source_pages: int
-    leads_allocated: float
+    leads_allocated: float  # the share, at full precision (same as share; kept for older readers)
     attribution: str  # exact (one source page) or shared
+    share: float = 0.0  # this page's share of the tag's leads, full precision, for audit
+    leads_whole: int = 0  # floor(share): what is shown to readers (a lead is a whole record)
+    carries_tag: bool = True  # true even when leads_whole is 0
+
+    def __post_init__(self) -> None:
+        if not self.share and self.leads_allocated:
+            self.share = self.leads_allocated
+            self.leads_whole = math.floor(self.share + 1e-9)
 
 
 @dataclass
@@ -223,6 +232,8 @@ def attribute(store, lead_tags: dict[str, TagLeads], fallback: str | None = "str
                 tag_source_pages=n_src,
                 leads_allocated=t.leads / n_src,
                 attribution="exact" if n_src == 1 else "shared",
+                share=t.leads / n_src,
+                leads_whole=math.floor(t.leads / n_src),
             ))
     return LeadResult(rows, tags, lead_tags)
 
@@ -280,29 +291,50 @@ def run_leads(store, config, run_dir: Path) -> tuple[LeadResult, Path]:
 # --------------------------------------------------------------------------- graph annotations
 
 
-def lead_annotations(store, g) -> tuple[dict[str, dict], dict[tuple[str, str], float]]:
-    """Node attributes (leads_origin, leads_exact, leads_landed) and edge leads
-    from the stored attribution. Empty when ``pathcrawl leads`` has not run."""
-    nodes: dict[str, dict] = defaultdict(lambda: {"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0})
+def lead_annotations(store, g) -> tuple[dict[str, dict], dict[tuple[str, str], int]]:
+    """Node attributes and edge lead counts from the stored attribution, as
+    whole leads (rounded down; a lead is a whole record):
+
+    - ``leads_origin``: floor of the page's summed shares; ``leads_exact``: the
+      same for its exact (single-carrier) shares; ``leads_share``: the summed
+      shares at full precision, for audit; ``carries_lead_tag``: true for every
+      page with a share, even when its whole count is 0.
+    - ``leads_landed``: leads whose main conversion page is this page.
+    - Edge ``leads``: floor of the shares on that page-to-target link.
+
+    Empty when ``pathcrawl leads`` has not run.
+    """
+    share: dict[str, float] = defaultdict(float)
+    exact: dict[str, float] = defaultdict(float)
     edges: dict[tuple[str, str], float] = defaultdict(float)
-    rows = store.lead_attribution()
-    for r in rows:
-        n = nodes[r["src"]]
-        n["leads_origin"] += r["leads_allocated"]
+    for r in store.lead_attribution():
+        value = r["share"] if r["share"] is not None else r["leads_allocated"]
+        share[r["src"]] += value
         if r["attribution"] == "exact":
-            n["leads_exact"] += r["leads_allocated"]
-        targets = [t for t in (r["targets"] or "").split() if t]
-        in_graph = [t for t in targets if t in g]
+            exact[r["src"]] += value
+        in_graph = [t for t in (r["targets"] or "").split() if t in g]
         for t in in_graph:
-            edges[(r["src"], t)] += r["leads_allocated"] / len(in_graph)
+            edges[(r["src"], t)] += value / len(in_graph)
+    nodes: dict[str, dict] = {
+        n: {"leads_origin": _floor(v), "leads_exact": _floor(exact.get(n, 0.0)), "leads_share": round(v, 6),
+            "carries_lead_tag": True, "leads_landed": 0}
+        for n, v in share.items()
+    }
     meta = store.meta("leads", {}) or {}
     if meta:
         by_lower = {n.lower(): n for n in g}
         for page, leads in (meta.get("conversion_pages") or {}).items():
             node = by_lower.get(page.lower())
             if node:
-                nodes[node]["leads_landed"] += leads
-    return {k: {a: round(v, 3) for a, v in d.items()} for k, d in nodes.items()}, {k: round(v, 3) for k, v in edges.items()}
+                nodes.setdefault(node, {"leads_origin": 0, "leads_exact": 0, "leads_share": 0.0,
+                                        "carries_lead_tag": False, "leads_landed": 0})
+                nodes[node]["leads_landed"] += int(round(leads))
+    return nodes, {k: _floor(v) for k, v in edges.items()}
+
+
+def _floor(v: float) -> int:
+    """Round down, tolerating float noise (2.9999999 -> 3)."""
+    return math.floor(v + 1e-9)
 
 
 # --------------------------------------------------------------------------- report
@@ -346,22 +378,31 @@ def lead_section(store, g, min_cell: int, short) -> list[str]:
 
     origin: dict[str, dict[str, float]] = defaultdict(lambda: {"all": 0.0, "exact": 0.0})
     for r in rows:
-        origin[r["src"]]["all"] += r["leads_allocated"]
+        value = r["share"] if r["share"] is not None else r["leads_allocated"]
+        origin[r["src"]]["all"] += value
         if r["attribution"] == "exact":
-            origin[r["src"]]["exact"] += r["leads_allocated"]
+            origin[r["src"]]["exact"] += value
     exact_pages = sum(1 for v in origin.values() if v["exact"])
     exact_total = sum(v["exact"] for v in origin.values())
-    allocated = sum(v["all"] for v in origin.values())
-    L.append(f"**{len(origin)} pages carry allocated leads** ({_n(round(allocated, 1))} in total); "
-             f"{exact_pages} of them hold exact leads ({_n(round(exact_total, 1))}, "
-             f"{round(100 * exact_total / allocated) if allocated else 0}% of the allocated total).")
+    allocated = math.fsum(v["all"] for v in origin.values())
+    whole = {src: _floor(v["all"]) for src, v in origin.items()}
+    whole_total = sum(whole.values())
+    under_one = sum(1 for src in origin if whole[src] == 0)
+    L.append(f"**{len(origin)} pages carry allocated leads** ({_n(round(allocated, 6))} in total); "
+             f"{exact_pages} of them hold exact leads ({_n(_floor(exact_total))} whole leads from a single carrier), "
+             f"the rest share a tag with other pages.")
+    L.append("")
+    L.append(f"- Leads are shown as whole numbers, rounded down per page (a lead is a whole record). Pages add to "
+             f"**{whole_total} of {_n(round(allocated, 6))} allocated**; the gap of "
+             f"{_n(round(allocated - whole_total, 6))} is the fractions lost to rounding down.")
+    L.append(f"- {under_one} page{'s carry' if under_one != 1 else ' carries'} a tag with a share under one lead and show 0; "
+             "they still count as pages where a lead was allocated.")
     L.append("")
     if origin:
-        L.append("| page carrying the tag | leads allocated | exact | shared |")
+        L.append("| page carrying the tag | leads (whole) | exact | shared |")
         L.append("|---|---|---|---|")
         for src, v in sorted(origin.items(), key=lambda kv: (-kv[1]["all"], kv[0]))[:15]:
-            L.append(f"| {short(src)} | {_n(round(v['all'], 1))} | {_n(round(v['exact'], 1))} | "
-                     f"{_n(round(v['all'] - v['exact'], 1))} |")
+            L.append(f"| {short(src)} | {whole[src]} | {_floor(v['exact'])} | {_floor(v['all'] - v['exact'])} |")
         L.append("")
 
     off_target = [t for t in tags if t.join and t.lands_on_target is False]

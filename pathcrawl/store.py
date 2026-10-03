@@ -99,7 +99,9 @@ CREATE TABLE IF NOT EXISTS lead_attribution (
     tag_leads_total REAL NOT NULL,
     tag_source_pages INTEGER NOT NULL,
     leads_allocated REAL NOT NULL,
-    attribution TEXT NOT NULL         -- exact (one source page) or shared
+    attribution TEXT NOT NULL,        -- exact (one source page) or shared
+    share REAL,                       -- full-precision share of the tag's leads (audit)
+    leads_whole INTEGER               -- floor(share): the number shown to readers
 );
 CREATE TABLE IF NOT EXISTS page_entities (
     url TEXT NOT NULL,
@@ -128,6 +130,10 @@ MIGRATIONS = [
     ("pages", "robots_meta", "TEXT"),
     ("pages", "h1_count", "INTEGER"),         # H1s with text
     ("pages", "h1_empty_count", "INTEGER"),   # H1s with no text
+    ("pages", "section", "TEXT"),             # first path segment after the locale (pathcrawl.categorize)
+    ("pages", "page_type", "TEXT"),
+    ("lead_attribution", "share", "REAL"),
+    ("lead_attribution", "leads_whole", "INTEGER"),
 ]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
@@ -390,12 +396,20 @@ class Store:
             self.db.execute("DELETE FROM lead_attribution")
             self.db.executemany(
                 """INSERT INTO lead_attribution(src, mc_id, lead_tag, join_type, targets, region, tag_leads_total,
-                   tag_source_pages, leads_allocated, attribution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   tag_source_pages, leads_allocated, attribution, share, leads_whole)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(r.src, r.mc_id, r.lead_tag, r.join, r.targets, r.region, r.tag_leads_total, r.tag_source_pages,
-                  r.leads_allocated, r.attribution) for r in rows],
+                  r.leads_allocated, r.attribution, r.share, r.leads_whole) for r in rows],
             )
 
     def lead_attribution(self) -> list[sqlite3.Row]:
         return self.db.execute(
             "SELECT * FROM lead_attribution ORDER BY leads_allocated DESC, src, mc_id"
         ).fetchall()
+
+    def set_categories(self, rows) -> None:
+        """Store each page's section and page type (from ``categorize``) so
+        anything reading crawl.db can group pages the same way the report does."""
+        with self.db:
+            self.db.executemany("UPDATE pages SET section = ?, page_type = ? WHERE url = ?",
+                                [(r.section, r.page_type, r.url) for r in rows])

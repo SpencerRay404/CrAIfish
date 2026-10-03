@@ -141,3 +141,26 @@ def test_a_dead_landing_page_is_not_made_an_entry(tmp_path):
     p = plan(rows, cfg.scope, [], [W + "home"], cfg.win, dead={A + "gone-story"})
     assert p.new_entries == [] and p.seeds[0].links[0].target == A + "gone-story"
 
+
+
+def test_links_from_dead_pages_are_not_counted(tmp_path):
+    """A dead page's own menu linking to another dead page doesn't count."""
+    build_run(tmp_path)
+    s = Store(tmp_path / "crawl.db")
+    # the dead story page links (nav) to the soft-404 page
+    s.db.execute("INSERT INTO links(src, href, url, text, region, in_scope) VALUES (?, ?, ?, 'x', 'nav', 1)",
+                 (A + "gone-story", A + "soft", A + "soft"))
+    s.db.commit()
+    nodes, _ = dead_annotations(s)
+    assert nodes[A + "soft"]["inbound_dead_links"] == 1  # only home's footer link
+    assert all(lk.src != A + "gone-story" for lk in dead_links(s))
+    s.close()
+
+
+def test_sections_are_stored_in_the_database(tmp_path):
+    build_run(tmp_path)
+    CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
+    s = Store(tmp_path / "crawl.db")
+    row = s.db.execute("SELECT section, page_type FROM pages WHERE url = ?", (W + "news",)).fetchone()
+    s.close()
+    assert row["section"] == "news" and row["page_type"]

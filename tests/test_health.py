@@ -160,7 +160,7 @@ def test_lead_bearing_pages_get_their_own_row(tmp_path):
     CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
     md = (tmp_path / "report.md").read_text()
     assert "| **pages carrying leads** | 1 | 0 | 1 (100%) | 0 (0%) | 0 |" in md
-    assert health_rows(tmp_path)[HOME]["leads_allocated"] == "7.0"
+    assert health_rows(tmp_path)[HOME]["leads_allocated"] == "7"  # whole leads
 
 
 def test_old_runs_say_the_new_signals_were_not_recorded(tmp_path):

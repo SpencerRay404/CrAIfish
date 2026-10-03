@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import math
 import json
 import re
 from collections import defaultdict, deque
@@ -85,7 +86,8 @@ class PageHealth:
     raw_text_share: float | None
     redirect_hops: int
     carries_lead_tags: bool
-    leads_allocated: float
+    leads_allocated: int  # whole leads, rounded down (a lead is a whole record)
+    carries_leads: bool  # the page has an allocated share, even if under one lead
 
 
 def _bfs(g, start: str | None, edge_ok: Callable[[dict], bool]) -> dict[str, int]:
@@ -129,10 +131,10 @@ def page_health(run, categories, home: str | None) -> list[PageHealth]:
     tagged = {r["src"] for r in store.db.execute("SELECT DISTINCT src FROM links WHERE mc_id IS NOT NULL")}
     leads = defaultdict(float)
     for r in store.lead_attribution():
-        leads[r["src"]] += r["leads_allocated"]
+        leads[r["src"]] += r["share"] if r["share"] is not None else r["leads_allocated"]
     for r in store.db.execute("SELECT src, url FROM links WHERE url IS NOT NULL"):
         t = store.resolve(r["url"])
-        if t in dead and t != r["src"]:
+        if t in dead and t != r["src"] and r["src"] not in dead:  # live linking pages only
             dead_sources[t].add(r["src"])
 
     out = []
@@ -175,7 +177,8 @@ def page_health(run, categories, home: str | None) -> list[PageHealth]:
             raw_text_share=None if raw is None or not rendered else round(raw / rendered, 3),
             redirect_hops=max(0, len(chain) - 1),
             carries_lead_tags=url in tagged,
-            leads_allocated=round(leads.get(url, 0.0), 3),
+            leads_allocated=math.floor(leads.get(url, 0.0) + 1e-9),
+            carries_leads=url in leads,
         ))
     return out
 
@@ -510,7 +513,7 @@ def health_section(rows: list[PageHealth], home: str | None, site: dict, short,
                  "(crawled before they were added); a new crawl records them.")
         L.append("")
 
-    lead_rows = [r for r in rows if r.leads_allocated > 0]
+    lead_rows = [r for r in rows if r.carries_leads]
     groups = [("section", "By section"), ("page_type", "By page type")]
     for key, title in groups:
         L.append(f"### {title}")

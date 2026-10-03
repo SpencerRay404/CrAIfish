@@ -750,6 +750,7 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     out = Path(out_dir or run.dir)
     analysis = run.analyze()
     categories = categorize(run.store, run.graph, analysis, run.config.scope.locale_include)
+    run.store.set_categories(categories)
     summary = summarize(categories)
     short = make_short(list(run.graph))
     mermaid = mermaid_paths(analysis, short)
@@ -803,8 +804,9 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     annotations = Annotations()
     lead_nodes, lead_edges = lead_annotations(store, run.graph)
     if lead_nodes or store.meta("leads"):
-        annotations.add_nodes({"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0}, lead_nodes)
-        annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
+        annotations.add_nodes({"leads_origin": 0, "leads_exact": 0, "leads_landed": 0, "leads_share": 0.0,
+                               "carries_lead_tag": False}, lead_nodes)
+        annotations.add_edges({"leads": 0}, {e: {"leads": v} for e, v in lead_edges.items()})
         extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
         zero_path = out / f"{run.config.client.slug}_zero_lead_tags.csv"
         write_zero_lead_csv(zero_lead_tags(store, run.graph), zero_path)

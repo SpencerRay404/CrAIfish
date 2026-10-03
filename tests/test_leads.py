@@ -217,7 +217,10 @@ def test_leads_cli_and_report(tmp_path, lead_file):
     assert "5 tags in the lead file" in section
     assert "30 of 38 tagged leads (79%)" in section
     assert "Leads with a paid click ID: 9 (24%)" in section
-    assert "**3 pages carry allocated leads** (30 in total); 2 of them hold exact leads (20, 67%" in section
+    assert "**3 pages carry allocated leads** (30 in total); 2 of them hold exact leads (20 whole leads from a single " \
+           "carrier)" in section
+    assert "Pages add to **30 of 30 allocated**; the gap of 0 is the fractions lost to rounding down." in section
+    assert "- 0 pages carry a tag with a share under one lead and show 0" in section
     assert "| /retail | 12 | 12 | 0 |" in section
     assert "TAG_OLD (8 leads): links point at" in section
     assert "TAG_AD_ONLY (6)" in section
@@ -325,3 +328,35 @@ def test_lead_totals_and_zero_lead_tags_in_report(tmp_path, lead_file):
                      "win_types": "consultation form"}]
     data = json.loads((run / "report.json").read_text())
     assert (data["leads"]["leads_untagged"], data["leads"]["leads_all"]) == (75, 113)
+
+
+def test_whole_number_leads(tmp_path):
+    """Fix 6: shares are kept at full precision; readers see whole leads, rounded down."""
+    import math
+
+    run = tmp_path / "run"
+    run.mkdir()
+    # TAG_SHARED: 7 leads over 2 pages = 3.5 each; TAG_OLD: 1 lead on one page;
+    # TAG_NOLEADS: 0.9 on one page (an aggregated file may hold fractions).
+    rows = [("TAG_SHARED", 7, 0, 0, ""), ("TAG_OLD", 1, 0, 0, ""), ("TAG_NOLEADS", 0.9, 0, 0, "")]
+    lf = write_leads(tmp_path / "l.csv", rows)
+    build_run(run, lf)
+    CliRunner().invoke(app, ["report", "--run", str(run)])
+    s = Store(run / "crawl.db")
+    shares = [r["share"] for r in s.lead_attribution()]
+    wholes = [r["leads_whole"] for r in s.lead_attribution()]
+    s.close()
+    assert math.fsum(shares) == 7 + 1 + 0.9  # full precision: sums exactly to the matched leads
+    assert sorted(wholes) == [0, 1, 3, 3] and all(isinstance(w, int) for w in wholes)
+    md = (run / "report.md").read_text()
+    # auto: 3.5 + 1 = 4.5 -> 4; whole: 3.5 -> 3; news: 0.9 -> 0
+    assert "Pages add to **7 of 8.9 allocated**; the gap of 1.9 is the fractions lost to rounding down." in md
+    assert "- 1 page carries a tag with a share under one lead and show 0" in md
+    data = json.loads((run / "report.json").read_text())
+    news = data["nodes"][B + "news"]
+    assert (news["leads_origin"], news["carries_lead_tag"], news["leads_share"]) == (0, True, 0.9)
+    assert data["nodes"][B + "auto"]["leads_origin"] == 4
+    assert all(isinstance(e["leads"], int) for e in data["edges"] if "leads" in e)
+    with open(run / "xco_lead_attribution.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert {r["leads_whole"] for r in rows} <= {"0", "1", "3"} and all("share" in r for r in rows)
