@@ -173,6 +173,8 @@ class PageData:
     og_properties: list[str] = field(default_factory=list)  # og:* meta properties present
     hreflang: list[str] = field(default_factory=list)  # languages of <link rel=alternate hreflang>
     robots_meta: str | None = None  # content of <meta name=robots>
+    # Content and service signals (peer comparison: the page_tags table)
+    tags: dict | None = None
 
 
 def extract_page(html: str, page_url: str, form_selector: str | None = None) -> PageData:
@@ -195,11 +197,15 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
             break
 
     types: list[str] = []
+    jsonld: list[object] = []
     for script in soup.find_all("script", attrs={"type": lambda v: v and v.lower() == "application/ld+json"}):
         try:
-            types.extend(_jsonld_types(json.loads(script.string or "")))
+            parsed = json.loads(script.string or "")
         except ValueError:
             types.append("(invalid JSON-LD)")
+            continue
+        jsonld.append(parsed)
+        types.extend(_jsonld_types(parsed))
 
     form_present = bool(soup.select_one(form_selector)) if form_selector else None
 
@@ -215,6 +221,7 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
         if "alternate" in [r.lower() for r in (rel if isinstance(rel, list) else [rel])]:
             hreflang.add(str(link["hreflang"]).strip().lower())
     robots = soup.find("meta", attrs={"name": lambda v: v and v.lower() == "robots"})
+    tags = page_tags(soup, page_url, jsonld, sorted(set(types) | microdata | rdfa))
 
     return PageData(
         title=title,
@@ -229,7 +236,143 @@ def extract_page(html: str, page_url: str, form_selector: str | None = None) -> 
         og_properties=sorted(og),
         hreflang=sorted(hreflang),
         robots_meta=" ".join(str(robots.get("content", "")).split()).lower() or None if robots else None,
+        tags=tags,
     )
+
+
+# --------------------------------------------------------------------------- page tags
+
+SERVICE_TYPES = {"Service", "Product", "Offer", "FinancialProduct", "ProductModel"}
+NAV_LABEL_LIMIT = 300
+
+
+def _text(el) -> str:
+    return " ".join(el.get_text(" ", strip=True).split()) if el is not None else ""
+
+
+def _walk_jsonld(value: object):
+    if isinstance(value, dict):
+        yield value
+        for v in value.values():
+            yield from _walk_jsonld(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _walk_jsonld(v)
+
+
+def _types_of(node: dict) -> set[str]:
+    t = node.get("@type")
+    return {t} if isinstance(t, str) else {str(x) for x in t} if isinstance(t, list) else set()
+
+
+def _position(item: dict) -> float:
+    try:
+        return float(item.get("position"))
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _jsonld_breadcrumb(jsonld: list[object]) -> list[str]:
+    for node in (n for doc in jsonld for n in _walk_jsonld(doc)):
+        if "BreadcrumbList" in _types_of(node):
+            items = node.get("itemListElement") or []
+            items = items if isinstance(items, list) else [items]
+            out = []
+            for it in sorted((i for i in items if isinstance(i, dict)), key=_position):
+                name = it.get("name")
+                if not name and isinstance(it.get("item"), dict):
+                    name = it["item"].get("name")
+                if name:
+                    out.append(" ".join(str(name).split()))
+            if out:
+                return out
+    return []
+
+
+def _visible_breadcrumb(soup) -> list[str]:
+    el = soup.find(attrs={"aria-label": lambda v: v and "breadcrumb" in v.lower()}) or soup.find(
+        class_=lambda c: c and "breadcrumb" in (" ".join(c) if isinstance(c, list) else c).lower())
+    if el is None:
+        return []
+    items = [_text(x) for x in el.find_all(["a", "li", "span"]) if not x.find(["a", "li"])]
+    out = []
+    for t in items:
+        if t and t not in out and len(t) < 80:
+            out.append(t)
+    return out
+
+
+def _service_entities(jsonld: list[object], soup) -> list[str]:
+    names = []
+    for node in (n for doc in jsonld for n in _walk_jsonld(doc)):
+        types = _types_of(node)
+        if types & SERVICE_TYPES and node.get("name"):
+            names.append(" ".join(str(node["name"]).split()))
+        if "FAQPage" in types:
+            for q in node.get("mainEntity") or []:
+                if isinstance(q, dict) and q.get("name"):
+                    names.append(" ".join(str(q["name"]).split()))
+    for el in soup.find_all(attrs={"itemtype": lambda v: v and any(t in v for t in SERVICE_TYPES)}):
+        name = el.find(attrs={"itemprop": "name"})
+        if name is not None and _text(name):
+            names.append(_text(name))
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def _parent_label(a) -> str:
+    """The label of the menu group a navigation link sits in: the first
+    heading, button or label-like child of its nearest list item or group
+    that is not the link itself."""
+    for anc in list(a.parents)[:6]:
+        if not isinstance(anc, Tag) or anc.name in ("nav", "header", "footer", "body"):
+            break
+        for child in anc.find_all(["h2", "h3", "h4", "h5", "h6", "button", "span", "a", "p"], recursive=False):
+            if child is a or a in child.descendants:
+                continue
+            label = _text(child)
+            if label and len(label) < 60:
+                return label
+    return ""
+
+
+def _nav_labels(soup) -> list[list[str]]:
+    out, seen = [], set()
+    for region in soup.find_all(["nav", "header", "footer"]) + soup.find_all(
+            attrs={"role": lambda v: v in ("navigation", "banner", "contentinfo")}):
+        for a in region.find_all("a", href=True):
+            label = _text(a)
+            if not label or len(label) > 80:
+                continue
+            pair = (_parent_label(a), label)
+            if pair not in seen:
+                seen.add(pair)
+                out.append(list(pair))
+            if len(out) >= NAV_LABEL_LIMIT:
+                return out
+    return out
+
+
+def page_tags(soup, page_url: str, jsonld: list[object], schema_types: list[str]) -> dict:
+    """What a page says about its content and services, beyond the body text."""
+    from urllib.parse import urlsplit
+
+    def meta(attr: str, value: str) -> list[str]:
+        return [" ".join(str(m.get("content", "")).split()) for m in
+                soup.find_all("meta", attrs={attr: lambda v: v and v.lower() == value}) if m.get("content")]
+
+    h1 = next((_text(h) for h in soup.find_all("h1") if _text(h)), "")
+    keywords = [k.strip() for m in meta("name", "keywords") for k in m.split(",") if k.strip()]
+    return {
+        "h1": h1,
+        "url_path_segments": [s for s in urlsplit(page_url).path.split("/") if s],
+        "breadcrumb": _jsonld_breadcrumb(jsonld) or _visible_breadcrumb(soup),
+        "schema_types": schema_types,
+        "og_type": (meta("property", "og:type") or [None])[0],
+        "article_tags": meta("property", "article:tag"),
+        "meta_keywords": keywords,
+        "service_entities": _service_entities(jsonld, soup),
+        "nav_labels": _nav_labels(soup),
+    }
 
 
 def _schema_name(t: str) -> str:

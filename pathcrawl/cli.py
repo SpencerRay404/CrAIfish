@@ -603,3 +603,25 @@ def site_signals_cmd(
                       "files with its browser at the end of a crawl, which may get through.",
                       highlight=False, soft_wrap=True)
     console.print("Saved; run pathcrawl report to include them.")
+
+
+@app.command()
+def topics(
+    run: Path = typer.Option(..., "--run", help="A run directory from pathcrawl crawl."),
+    taxonomy: Path = typer.Option(Path("configs/topics.yaml"), "--taxonomy", help="Shared topic taxonomy."),
+) -> None:
+    """Tag every page with the shared topic taxonomy (title, H1, breadcrumb, menu label, URL path)."""
+    from pathcrawl.backfill import backfill_page_tags
+    from pathcrawl.topics import tag_run
+
+    _load_taxonomy(taxonomy)  # fail early, with the file's own error, if it doesn't load
+    r = _open(run)
+    try:
+        added = backfill_page_tags(r.store)
+        s = tag_run(r.store, taxonomy)
+    finally:
+        r.close()
+    if added:
+        console.print(f"Page tags rebuilt from stored data for {added} pages crawled before they were recorded.")
+    console.print(f"Topics ({escape(str(taxonomy))}, version {escape(str(s['version']))}, {s['fingerprint']}): "
+                  f"{s['pages_tagged']} of {s['pages']} pages tagged, {s['tags']} tags.", highlight=False, soft_wrap=True)

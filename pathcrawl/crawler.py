@@ -703,6 +703,7 @@ class Crawler:
             og_properties=data.og_properties,
             hreflang=data.hreflang,
             robots_meta=data.robots_meta,
+            tags=data.tags,
         )
 
     def _follow_operator_url(self, src: str, depth: int, decision: Decision) -> None:

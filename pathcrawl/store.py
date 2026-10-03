@@ -103,6 +103,28 @@ CREATE TABLE IF NOT EXISTS lead_attribution (
     share REAL,                       -- full-precision share of the tag's leads (audit)
     leads_whole INTEGER               -- floor(share): the number shown to readers
 );
+CREATE TABLE IF NOT EXISTS page_tags (
+    url TEXT PRIMARY KEY,
+    source TEXT NOT NULL,             -- crawl (read from the page) or backfill (rebuilt from stored data)
+    title TEXT,
+    meta_description TEXT,
+    h1 TEXT,
+    url_path_segments TEXT,           -- JSON list
+    breadcrumb TEXT,                  -- JSON list (BreadcrumbList JSON-LD, else the visible breadcrumb)
+    schema_types TEXT,                -- JSON list: JSON-LD, Microdata and RDFa types
+    og_type TEXT,
+    article_tags TEXT,                -- JSON list
+    meta_keywords TEXT,               -- JSON list
+    service_entities TEXT,            -- JSON list: names under Service, Product, Offer, FAQPage
+    nav_labels TEXT                   -- JSON list of [parent label, label]
+);
+CREATE TABLE IF NOT EXISTS page_topics (
+    url TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    field TEXT NOT NULL,              -- title, h1, breadcrumb, nav_label or url_path
+    rule TEXT NOT NULL,               -- the taxonomy term that matched
+    PRIMARY KEY (url, topic)
+);
 CREATE TABLE IF NOT EXISTS page_entities (
     url TEXT NOT NULL,
     entity_type TEXT NOT NULL,        -- Industry, Segment, Service, Topic, Customer
@@ -176,6 +198,7 @@ class PageRecord:
     robots_meta: str | None = None
     h1_count: int | None = None
     h1_empty_count: int | None = None
+    tags: dict | None = None  # page_tags fields (extract.page_tags)
 
 
 @dataclass
@@ -313,6 +336,8 @@ class Store:
                     *((None, None) if page.headings is None else h1_counts(page.headings)),
                 ),
             )
+            if page.tags is not None:
+                self.save_page_tags(page.url, "crawl", page.title, page.meta_description, page.tags)
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))
             self.db.executemany(
                 """INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id, params)
@@ -413,3 +438,36 @@ class Store:
         with self.db:
             self.db.executemany("UPDATE pages SET section = ?, page_type = ? WHERE url = ?",
                                 [(r.section, r.page_type, r.url) for r in rows])
+
+    # ------------------------------------------------------------------ page tags and topics
+
+    TAG_LISTS = ("url_path_segments", "breadcrumb", "schema_types", "article_tags", "meta_keywords",
+                 "service_entities", "nav_labels")
+
+    def save_page_tags(self, url: str, source: str, title, meta_description, tags: dict) -> None:
+        self.db.execute(
+            """INSERT OR REPLACE INTO page_tags(url, source, title, meta_description, h1, url_path_segments,
+               breadcrumb, schema_types, og_type, article_tags, meta_keywords, service_entities, nav_labels)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (url, source, title, meta_description, tags.get("h1"),
+             *(None if tags.get(k) is None else json.dumps(tags[k]) for k in self.TAG_LISTS[:3]),
+             tags.get("og_type"),
+             *(None if tags.get(k) is None else json.dumps(tags[k]) for k in self.TAG_LISTS[3:])),
+        )
+
+    def page_tags(self) -> dict[str, dict]:
+        out = {}
+        for r in self.db.execute("SELECT * FROM page_tags"):
+            d = dict(r)
+            for k in self.TAG_LISTS:
+                d[k] = json.loads(d[k]) if d[k] else []
+            out[d["url"]] = d
+        return out
+
+    def replace_page_topics(self, rows) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM page_topics")
+            self.db.executemany("INSERT OR REPLACE INTO page_topics(url, topic, field, rule) VALUES (?, ?, ?, ?)", rows)
+
+    def page_topics(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM page_topics ORDER BY url, topic").fetchall()

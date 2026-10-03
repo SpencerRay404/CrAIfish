@@ -364,6 +364,7 @@ def test_health_signals_are_recorded(make_site, tmp_path):
     c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
     row = page_row(c, site.base + "/start.html")
     assert (row["og_properties"], row["microdata_types"], row["robots_meta"]) == ('["og:title"]', '["Product"]', "index")
+    assert c.store.page_tags()[site.base + "/start.html"]["schema_types"] == ["Product"]  # page tags at crawl time
     signals = c.store.meta("site_signals")
     h = signals[site.base.split("//")[1]]
     assert h["robots_txt"] and h["llms_txt"] and h["ai_crawlers"]["GPTBot"]["allowed_home"] is False

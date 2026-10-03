@@ -1,0 +1,48 @@
+# Shared topic taxonomy for the peer comparison (UPS, FedEx, DHL, Flexport,
+# Maersk). One rule set for every site, frozen before any peer is tagged:
+# do not tune it per site. Change it only between comparison rounds, bump
+# `version`, and re-tag every site.
+#
+# Pages are tagged from their title, H1, breadcrumb, menu label (how the
+# site's own navigation names the page) and URL path, never the body text.
+# The first field that matches is recorded with the term that fired.
+#
+# Starting point: the UPS topic rules from the site explorer's topic map are
+# not in this repo. Merge them in here before the first peer is tagged, then
+# freeze. Terms: case-insensitive whole words; a trailing * matches any
+# ending; "re:" starts a regex.
+version: "2026-10-03-draft"
+types: [Topic]
+entities:
+  - {type: Topic, name: Ocean freight, terms: ["ocean freight", "ocean shipping", "sea freight", "ocean", "container shipping", "FCL", "LCL", "full container load", "less than container load"]}
+  - {type: Topic, name: Air freight, terms: ["air freight", "air cargo", "airfreight", "air shipping"]}
+  - {type: Topic, name: Ground and truckload freight, terms: ["LTL", "less-than-truckload", "less than truckload", "FTL", "truckload", "full truckload", "ground freight", "trucking", "intermodal", "rail freight", "road freight"]}
+  - {type: Topic, name: Parcel and express shipping, terms: ["parcel*", "package*", "express", "overnight", "next day", "same day", "ground shipping", "ship a package", "shipping rates", "domestic shipping"]}
+  - {type: Topic, name: International shipping, terms: ["international", "cross-border", "cross border", "global shipping", "export*", "import*", "worldwide"]}
+  - {type: Topic, name: Customs brokerage, terms: ["customs", "brokerage", "customs broker*", "duties", "tariff*", "trade compliance", "clearance", "HS code*"]}
+  - {type: Topic, name: Fulfillment, terms: ["fulfillment", "fulfilment", "order fulfillment", "3PL", "third-party logistics", "pick and pack", "micro-fulfillment", "eFulfillment"]}
+  - {type: Topic, name: Warehousing and distribution, terms: ["warehous*", "distribution center*", "distribution centre*", "storage", "inventory management", "inventory"]}
+  - {type: Topic, name: Supply chain and logistics, terms: ["supply chain", "logistics", "4PL", "contract logistics", "lead logistics", "visibility", "control tower"]}
+  - {type: Topic, name: Returns, terms: ["return*", "reverse logistics"]}
+  - {type: Topic, name: Last mile and delivery, terms: ["last mile", "last-mile", "delivery", "deliveries", "pickup", "pick-up", "access point*", "drop off"]}
+  - {type: Topic, name: Tracking, terms: ["track*", "tracking"]}
+  - {type: Topic, name: Healthcare and life sciences, terms: ["healthcare", "health care", "life sciences", "pharma*", "medical", "clinical", "cold chain", "temperature-sensitive", "biotech"]}
+  - {type: Topic, name: Retail and e-commerce, terms: ["retail*", "e-commerce", "ecommerce", "online store*", "marketplace*", "omnichannel", "D2C", "direct to consumer"]}
+  - {type: Topic, name: Manufacturing and industrial, terms: ["manufactur*", "industrial", "automotive", "aerospace", "high tech", "high-tech", "semiconductor*", "chemical*", "engineering"]}
+  - {type: Topic, name: Luxury and fashion, terms: ["luxury", "fashion", "apparel", "jewelry", "jewellery"]}
+  - {type: Topic, name: Food and perishables, terms: ["food", "perishable*", "beverage*", "grocery", "produce", "reefer", "refrigerated"]}
+  - {type: Topic, name: Wholesale and B2B, terms: ["wholesale*", "B2B", "distributor*"]}
+  - {type: Topic, name: Small business, terms: ["small business*", "SMB", "SMBs", "startup*", "small and medium"]}
+  - {type: Topic, name: Enterprise, terms: ["enterprise", "large business*", "corporate account*"]}
+  - {type: Topic, name: Urgent documents and critical shipping, terms: ["urgent", "documents", "letter*", "critical shipping", "time-critical", "time critical", "mission critical"]}
+  - {type: Topic, name: Freight forwarding, terms: ["freight forward*", "forwarding", "forwarder*", "NVOCC"]}
+  - {type: Topic, name: Insurance and claims, terms: ["insurance", "claim*", "declared value", "cargo insurance", "liability"]}
+  - {type: Topic, name: Packaging, terms: ["packaging", "packing", "boxes", "pack*"]}
+  - {type: Topic, name: Sustainability, terms: ["sustainab*", "carbon", "emission*", "green", "net zero", "net-zero", "climate", "circular economy", "electric vehicle*"]}
+  - {type: Topic, name: Technology and integrations, terms: ["API", "APIs", "developer*", "integration*", "software", "platform", "EDI", "plugin*", "app"]}
+  - {type: Topic, name: Rates and quotes, terms: ["rate*", "quote*", "pricing", "price*", "calculator", "cost*"]}
+  - {type: Topic, name: Account and billing, terms: ["account*", "billing", "invoice*", "payment*", "sign up", "signup", "log in", "login"]}
+  - {type: Topic, name: Insights and resources, terms: ["insight*", "blog", "article*", "resource*", "report*", "white paper*", "whitepaper*", "guide*", "case stud*", "webinar*", "news", "press release*", "stories", "story"]}
+  - {type: Topic, name: Support and help, terms: ["support", "help", "faq*", "contact us", "customer service", "service center*"]}
+  - {type: Topic, name: Sales and consultation, terms: ["contact sales", "talk to sales", "talk to an expert", "consultation", "consult*", "get started", "request a quote", "schedule a call", "book a demo", "demo"]}
+  - {type: Topic, name: Careers and company, terms: ["career*", "jobs", "about us", "investor*", "company", "leadership", "newsroom"]}

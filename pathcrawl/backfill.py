@@ -32,6 +32,7 @@ class LinkBackfill:
     duplicate_pages: list[list[str]] = field(default_factory=list)  # merged groups
     links_renormalized: int = 0
     dead_pages: int = 0
+    page_tags: int = 0
 
 
 def backfill_links(store, scope) -> LinkBackfill:
@@ -67,7 +68,44 @@ def backfill_links(store, scope) -> LinkBackfill:
     from pathcrawl.dead import backfill_dead
 
     out.dead_pages = backfill_dead(store)
+    out.page_tags = backfill_page_tags(store)
     return out
+
+
+def backfill_page_tags(store) -> int:
+    """page_tags rows for loaded pages crawled before page tags were recorded,
+    rebuilt from what crawl.db holds: title, description, H1, path, structured
+    data types and the page's own menu link labels (their group labels, the
+    breadcrumb, Open Graph and keyword tags weren't stored, so they stay
+    empty). Marked source = backfill."""
+    from urllib.parse import urlsplit
+
+    have = {r[0] for r in store.db.execute("SELECT url FROM page_tags")}
+    rows = store.db.execute(
+        """SELECT url, title, meta_description, headings, jsonld_types, microdata_types, rdfa_types
+           FROM pages WHERE status IN ('ok', 'http_error')""").fetchall()
+    n = 0
+    with store.db:
+        for r in rows:
+            if r["url"] in have:
+                continue
+            headings = json.loads(r["headings"]) if r["headings"] else []
+            types = set()
+            for col in ("jsonld_types", "microdata_types", "rdfa_types"):
+                types |= set(json.loads(r[col]) if r[col] else [])
+            labels = []
+            for lk in store.db.execute(
+                    "SELECT DISTINCT text FROM links WHERE src = ? AND region IN ('nav', 'header', 'footer') "
+                    "AND text != '' ORDER BY id", (r["url"],)):
+                labels.append(["", lk["text"]])
+            store.save_page_tags(r["url"], "backfill", r["title"], r["meta_description"], {
+                "h1": next((t for level, t in headings if level == 1 and t.strip()), ""),
+                "url_path_segments": [s for s in urlsplit(r["url"]).path.split("/") if s],
+                "breadcrumb": [], "schema_types": sorted(types), "og_type": None, "article_tags": [],
+                "meta_keywords": [], "service_entities": [], "nav_labels": labels[:300],
+            })
+            n += 1
+    return n
 
 
 def duplicate_pages(store, scope) -> list[list[str]]:
