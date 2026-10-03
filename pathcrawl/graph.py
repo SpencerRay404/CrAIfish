@@ -132,12 +132,13 @@ def win_nodes(g: nx.DiGraph) -> list[str]:
     return sorted(n for n, d in g.nodes(data=True) if d["win"])
 
 
-def distances_to_win(h: nx.DiGraph) -> dict[str, int]:
-    """Shortest click distance from each page to its nearest win (reverse BFS).
+def distances_to_win(h: nx.DiGraph, targets: Iterable[str] | None = None) -> dict[str, int]:
+    """Shortest click distance from each page to its nearest win (reverse BFS),
+    or to the nearest of ``targets`` when given (e.g. the wins of one type).
 
     Pages missing from the result have no path to any win.
     """
-    dist = {w: 0 for w in win_nodes(h)}
+    dist = {w: 0 for w in (win_nodes(h) if targets is None else [t for t in targets if t in h])}
     queue = deque(sorted(dist))
     while queue:
         node = queue.popleft()

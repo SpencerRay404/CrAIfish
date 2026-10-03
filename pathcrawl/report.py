@@ -417,6 +417,12 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
                 f"It was matched by URL, "
                 f"so the link to it ({w['linked_from']} page{'s' if w['linked_from'] != 1 else ''} link here) "
                 "is confirmed, but the form itself was not checked.")
+    _, types = win_type_distances(run.graph)
+    if types:
+        add("")
+        add("Win pages by type (crawled pages linking straight to one): " + "; ".join(
+            f"{t}: {v['win_pages']} page{'s' if v['win_pages'] != 1 else ''}, {v['pages_linking_directly']} linking"
+            for t, v in sorted(types.items())) + ".")
     misses = near_misses(run)
     if misses:
         add("")
@@ -553,6 +559,41 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
         add(f"- **{term}**: {text}")
     add("")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- win types
+
+
+def _slug(text: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "win"
+
+
+def win_type_distances(g) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Per node: clicks (all links) to the nearest win of any type
+    (``clicks_to_any_win``) and of each type (``clicks_to_<type>``, e.g.
+    ``clicks_to_virtual_consultation``); -1 = no path. Per type: win pages and
+    the crawled pages linking straight to one."""
+    h = mode_view(g, ALL_LINKS)
+    by_type: dict[str, list[str]] = {}
+    for n, d in g.nodes(data=True):
+        if d["win"]:
+            by_type.setdefault(d.get("win_type") or "win", []).append(n)
+    nodes: dict[str, dict] = {}
+    summary = {}
+    columns = [("clicks_to_any_win", None)] + [(f"clicks_to_{_slug(t)}", t) for t in sorted(by_type)]
+    for col, wtype in columns:
+        dist = distances_to_win(h, None if wtype is None else by_type[wtype])
+        for n, v in dist.items():
+            nodes.setdefault(n, {})[col] = v
+        if wtype is not None:
+            summary[wtype] = {
+                "win_pages": len(by_type[wtype]),
+                "pages_linking_directly": sum(1 for n, v in dist.items() if v == 1 and g.nodes[n]["explored"]),
+                "column": col,
+            }
+    return nodes, summary
 
 
 # --------------------------------------------------------------------------- health
@@ -774,6 +815,8 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     annotations.add_nodes({"has_structured_data": False, "js_dependent": False, "clicks_from_home_body_links": -1,
                            "clicks_from_home_all_links": -1}, health_annotations(health_rows))
     report["health"] = {"home_url": home, "summary": health_summary, "site_signals": site_signals}
+    type_nodes, report["win_types"] = win_type_distances(run.graph)
+    annotations.add_nodes({k: -1 for k in sorted({k for d in type_nodes.values() for k in d})}, type_nodes)
     if store.meta("external_seeds"):
         extra += external_seed_section(run, short)
         report["external_seeds"] = external_seed_rows(run)
