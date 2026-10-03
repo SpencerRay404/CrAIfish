@@ -275,3 +275,36 @@ def test_ups_health_home():
 
     c = load_config(Path(__file__).parent.parent / "configs" / "ups.yaml")
     assert c.health.home_url == "https://www.ups.com/us/en/home"
+
+
+def test_empty_h1s_are_counted_separately(tmp_path):
+    """Fix 4: a template's empty H1 next to the real one still passes the one-H1 check."""
+    from pathcrawl.extract import extract_page, h1_counts
+
+    d = extract_page("<html><body><h1> </h1><h1>Real title</h1><h2>x</h2></body></html>", W)
+    assert h1_counts(d.headings) == (1, 1)
+    assert h1_counts([(1, ""), (1, "")]) == (0, 2) and h1_counts([(2, "x")]) == (0, 0)
+
+    build_run(tmp_path)
+    s = Store(tmp_path / "crawl.db")
+    s.db.execute("UPDATE pages SET headings = ? WHERE url = ?", (json.dumps([[1, ""], [1, "Home"]]), HOME))
+    s.db.commit()
+    from pathcrawl.backfill import backfill_links
+    from pathcrawl.config import load_config
+
+    backfill_links(s, load_config(tmp_path / "config.yaml").scope)
+    assert tuple(s.db.execute("SELECT h1_count, h1_empty_count FROM pages WHERE url = ?", (HOME,)).fetchone()) == (1, 1)
+    s.close()
+    CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
+    row = health_rows(tmp_path)[HOME]
+    assert (row["h1_count"], row["h1_empty_count"]) == ("1", "1")
+    md = (tmp_path / "report.md").read_text()
+    assert "| exactly one H1 with text (passes) | 2 (40%) |" in md  # home and c
+    assert "| an empty H1 (alongside or instead of a real one) | 1 (20%) |" in md
+
+
+def test_crawler_store_records_h1_counts(tmp_path):
+    s = Store(tmp_path / "crawl.db")
+    s.save_page(PageRecord(url=W, status="ok", headings=[(1, ""), (1, "A"), (1, "B")]), [])
+    assert tuple(s.db.execute("SELECT h1_count, h1_empty_count FROM pages").fetchone()) == (2, 1)
+    s.close()

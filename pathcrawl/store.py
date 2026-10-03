@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pathcrawl.extract import h1_counts
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS entries (
@@ -124,6 +126,8 @@ MIGRATIONS = [
     ("pages", "og_properties", "TEXT"),       # JSON list
     ("pages", "hreflang", "TEXT"),            # JSON list
     ("pages", "robots_meta", "TEXT"),
+    ("pages", "h1_count", "INTEGER"),         # H1s with text
+    ("pages", "h1_empty_count", "INTEGER"),   # H1s with no text
 ]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
@@ -164,6 +168,8 @@ class PageRecord:
     og_properties: list[str] | None = None
     hreflang: list[str] | None = None
     robots_meta: str | None = None
+    h1_count: int | None = None
+    h1_empty_count: int | None = None
 
 
 @dataclass
@@ -283,8 +289,8 @@ class Store:
                    redirect_chain, canonical, title, meta_description, headings, body_text, form_present,
                    jsonld_types, raw_text_len, rendered_text_len, js_dependent, screenshot, win, win_source,
                    error, crawled_at, is_dead, dead_reason, microdata_types, rdfa_types, og_properties,
-                   hreflang, robots_meta)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   hreflang, robots_meta, h1_count, h1_empty_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     page.url, page.requested_url, page.status, page.depth, page.http_status, page.load_ms,
                     json.dumps(page.redirect_chain), page.canonical, page.title, page.meta_description,
@@ -298,6 +304,7 @@ class Store:
                     *(None if v is None else json.dumps(v)
                       for v in (page.microdata_types, page.rdfa_types, page.og_properties, page.hreflang)),
                     page.robots_meta,
+                    *((None, None) if page.headings is None else h1_counts(page.headings)),
                 ),
             )
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))

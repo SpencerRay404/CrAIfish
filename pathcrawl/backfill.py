@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 import json
 
+from pathcrawl.extract import h1_counts
 from pathcrawl.normalize import captured_params
 
 
@@ -49,6 +50,10 @@ def backfill_links(store, scope) -> LinkBackfill:
         updates.append((found.get(first), json.dumps(found) if found else None, r["id"]))
     with store.db:
         store.db.executemany("UPDATE links SET mc_id = ?, params = ? WHERE id = ?", updates)
+        # H1s with and without text
+        for r in store.db.execute("SELECT url, headings FROM pages WHERE headings IS NOT NULL").fetchall():
+            store.db.execute("UPDATE pages SET h1_count = ?, h1_empty_count = ? WHERE url = ?",
+                             (*h1_counts(json.loads(r["headings"])), r["url"]))
         # canonical URLs are stored normalized, like every other URL
         for r in store.db.execute("SELECT url, canonical FROM pages WHERE canonical IS NOT NULL").fetchall():
             new = scope.normalize(r["canonical"])

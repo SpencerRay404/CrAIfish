@@ -10,7 +10,8 @@ Per page (``<client>_site_health.csv``), for every loaded page:
   ``dead_inbound_pages`` (see ``pathcrawl.dead``).
 - ``has_title`` / ``title_duplicated`` and ``has_meta_description`` /
   ``meta_duplicated``: duplicate means the same lowercased text on more than
-  one loaded page. ``h1_count``. ``canonical_self``: the canonical URL is the
+  one loaded page. ``h1_count`` (H1s with text; the check passes at exactly
+  one) and ``h1_empty_count`` (empty H1s, reported on their own). ``canonical_self``: the canonical URL is the
   page itself (empty when there is no canonical).
 - ``structured_data_types`` (JSON-LD), ``microdata_types``, ``rdfa_types``,
   ``og_properties``, ``hreflang`` and ``robots_meta``. The last five are empty
@@ -41,7 +42,7 @@ from urllib.parse import urlsplit
 from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
 
-from pathcrawl.extract import BODY
+from pathcrawl.extract import BODY, h1_counts
 
 AI_CRAWLERS = [
     "GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User", "anthropic-ai",
@@ -70,7 +71,8 @@ class PageHealth:
     title_duplicated: bool
     has_meta_description: bool
     meta_duplicated: bool
-    h1_count: int
+    h1_count: int  # H1s with text
+    h1_empty_count: int  # H1s with no text (often a template's extra one)
     canonical_self: bool | None
     has_structured_data: bool
     structured_data_types: str
@@ -159,7 +161,8 @@ def page_health(run, categories, home: str | None) -> list[PageHealth]:
             title_duplicated=bool(p["title"]) and titles[p["title"].strip().lower()] > 1,
             has_meta_description=bool(p["meta_description"]),
             meta_duplicated=bool(p["meta_description"]) and metas[p["meta_description"].strip().lower()] > 1,
-            h1_count=sum(1 for level, _ in headings if level == 1),
+            h1_count=h1_counts(headings)[0],
+            h1_empty_count=h1_counts(headings)[1],
             canonical_self=None if not canonical else run.config.scope.normalize(canonical) == url,
             has_structured_data=bool(jsonld or micro or rdfa),
             structured_data_types=", ".join(jsonld),
@@ -339,8 +342,10 @@ def _summary(rows: list[PageHealth]) -> dict:
         "title_duplicated": sum(r.title_duplicated for r in rows),
         "missing_meta_description": sum(not r.has_meta_description for r in rows),
         "meta_duplicated": sum(r.meta_duplicated for r in rows),
+        "h1_one": sum(r.h1_count == 1 for r in rows),
         "h1_missing": sum(r.h1_count == 0 for r in rows),
         "h1_multiple": sum(r.h1_count > 1 for r in rows),
+        "h1_empty": sum(r.h1_empty_count > 0 for r in rows),
         "canonical_missing": sum(r.canonical_self is None for r in rows),
         "canonical_elsewhere": sum(r.canonical_self is False for r in rows),
         "redirected": sum(r.redirect_hops > 0 for r in rows),
@@ -383,8 +388,10 @@ def health_section(rows: list[PageHealth], home: str | None, site: dict, short,
         ("duplicated title", s["title_duplicated"]),
         ("missing meta description", s["missing_meta_description"]),
         ("duplicated meta description", s["meta_duplicated"]),
-        ("no H1", s["h1_missing"]),
-        ("more than one H1", s["h1_multiple"]),
+        ("exactly one H1 with text (passes)", s["h1_one"]),
+        ("no H1 with text", s["h1_missing"]),
+        ("more than one H1 with text", s["h1_multiple"]),
+        ("an empty H1 (alongside or instead of a real one)", s["h1_empty"]),
         ("no canonical URL", s["canonical_missing"]),
         ("canonical points elsewhere", s["canonical_elsewhere"]),
         ("reached through a redirect", s["redirected"]),

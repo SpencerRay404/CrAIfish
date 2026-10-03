@@ -290,3 +290,11 @@ def detect_dead(http_status: int | None, title: str | None, text: str | None) ->
         if phrase in body:
             return f"page says {phrase!r}"
     return None
+
+
+def h1_counts(headings) -> tuple[int, int]:
+    """(non-empty H1s, empty H1s). Many templates emit an empty H1 next to the
+    real one, so only H1s with text count as headings."""
+    h1 = [text for level, text in headings if level == 1]
+    empty = sum(1 for t in h1 if not (t or "").strip())
+    return len(h1) - empty, empty

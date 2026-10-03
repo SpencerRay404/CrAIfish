@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 import networkx as nx
 
+from pathcrawl.extract import h1_counts
 from pathcrawl.graph import MODES, Analysis, distances_to_win, mode_view
 
 # (type, URL path pattern). First match wins. Patterns are generic web
@@ -161,7 +162,7 @@ def categorize(store, g: nx.DiGraph, analysis: Analysis, locale_include: list[st
                 clicks_to_win_content_only=dist_content.get(url),
                 js_dependent=None if page["js_dependent"] is None else bool(page["js_dependent"]),
                 structured_data=", ".join(jsonld),
-                h1_count=sum(1 for level, _ in headings if level == 1),
+                h1_count=h1_counts(headings)[0],
                 missing_meta_description=explored and not page["meta_description"],
                 win_form_missing=is_win and page["form_present"] == 0,
                 operator_marked_win=page["win_source"] == "operator",
