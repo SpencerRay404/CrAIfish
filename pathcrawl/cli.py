@@ -589,19 +589,17 @@ def site_signals_cmd(
         r.store.set_meta(site_signals=signals)
     finally:
         r.close()
+    from pathcrawl.health import ai_cell, coverage_cell, llms_cell, robots_cell, sitemap_cell
+
     for host, h in signals.items():
-        blocked = [b for b, v in h["ai_crawlers"].items() if not v["allowed_home"]]
-        robots = "yes" if h["robots_txt"] else f"no (HTTP {h['robots_status'] or 'error: no response'})"
-        console.print(f"{escape(host)}: robots.txt {robots}, "
-                      f"AI crawlers blocked from home: {len(blocked)}"
-                      + (f" ({', '.join(blocked)})" if blocked else "")
-                      + f", llms.txt {'yes' if h['llms_txt'] else 'no'}, sitemaps read {h['sitemaps_read']} of "
-                      f"{len(h['sitemaps_declared'])} declared, sitemap URLs {h['sitemap_urls']}, crawled pages in "
-                      f"sitemap {h['crawled_pages_in_sitemap']}/{h['crawled_pages']}", highlight=False, soft_wrap=True)
+        console.print(f"{escape(host)}: robots.txt {escape(robots_cell(h))}; AI crawlers named/blocked "
+                      f"{escape(ai_cell(h))}; llms.txt {escape(llms_cell(h))}; sitemap {escape(sitemap_cell(h))}; "
+                      f"crawled pages in sitemap {escape(coverage_cell(h))}", highlight=False, soft_wrap=True)
         for e in h["errors"][:3]:
             console.print(f"  [yellow]{escape(e)}[/]", highlight=False, soft_wrap=True)
-    if any(not h["robots_txt"] or h["errors"] for h in signals.values()):
-        console.print("HTTP 403 or no response usually means the site refuses plain HTTP clients. The crawler "
-                      "checks the same files with its browser at the end of a crawl, which may get through.",
+    if any(h.get("robots_state") == "unreadable" or h.get("sitemap_state") == "unreadable" for h in signals.values()):
+        console.print("Unreadable is not the same as absent: the request failed, so coverage is unknown. HTTP 403 or "
+                      "no response usually means the site refuses plain HTTP clients; the crawler checks the same "
+                      "files with its browser at the end of a crawl, which may get through.",
                       highlight=False, soft_wrap=True)
     console.print("Saved; run pathcrawl report to include them.")

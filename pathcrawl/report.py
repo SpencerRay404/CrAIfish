@@ -418,7 +418,8 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
             form = {True: "form found", False: "form not rendered", None: "form not checked"}[w["form_present"]]
             add(f"- Win page {w['url']}{type_note(w)}: loaded ({form}).")
         else:
-            add(f"- Win page {w['url']}{type_note(w)}: win page not fetched: {w['not_fetched_reason']}. "
+            add(f"- Win page {w['url']}{type_note(w)}: matched by address, not read (win page not fetched: "
+                f"{w['not_fetched_reason']}). "
                 f"It was matched by URL, "
                 f"so the link to it ({w['linked_from']} page{'s' if w['linked_from'] != 1 else ''} link here) "
                 "is confirmed, but the form itself was not checked.")
