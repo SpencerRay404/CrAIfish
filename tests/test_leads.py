@@ -280,3 +280,48 @@ def test_lead_data_is_ignored_by_git():
 
     text = (Path(__file__).parent.parent / ".gitignore").read_text()
     assert "data/**/raw*" in text and "*MKT_TRK*" in text
+
+
+def test_tags_are_cleaned_and_untagged_leads_counted(tmp_path):
+    build_run(tmp_path)
+    lead_file = write_leads(tmp_path / "l.csv", [
+        (", TAG_SHARED", 10, 0, 0, ""),   # a leading comma used to stop the match
+        ("", 75, 0, 0, ""),              # untagged: counted, never joined
+        ("  ", 5, 0, 0, ""),
+    ])
+    tags = load_lead_tags([lead_file])
+    assert list(tags) == ["TAG_SHARED"] and tags.untagged == 80
+    s = Store(tmp_path / "crawl.db")
+    result = attribute(s, tags)
+    s.close()
+    assert {t.lead_tag: t.join for t in result.tags} == {"TAG_SHARED": "exact"}
+
+
+def test_link_tags_are_cleaned_at_capture():
+    from pathcrawl.normalize import captured_param
+
+    assert captured_param("https://x.test/t?WT.mc_id=,%20ONLINE_X_1", ["WT.mc_id"]) == "ONLINE_X_1"
+    assert captured_param("https://x.test/t?WT.mc_id=,", ["WT.mc_id"]) is None
+
+
+def test_lead_totals_and_zero_lead_tags_in_report(tmp_path, lead_file):
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = LEAD_ROWS + [("", 75, 0, 0, "")]
+    lf = write_leads(tmp_path / "with_untagged.csv", rows)
+    build_run(run, lf)
+    result = CliRunner().invoke(app, ["report", "--run", str(run)])
+    assert result.exit_code == 0, result.output
+    md = (run / "report.md").read_text()
+    assert "**They cover 30 of 38 tagged leads (79%).**" in md
+    assert "- Tagged leads (a tag in the lead file): 38" in md
+    assert "- Untagged leads (no tag, so they can't be joined to a link): 75" in md
+    assert "- All leads in the file: 113" in md
+    assert "**Tags that earned no leads:** 1 tags carried by crawled links have no leads in the lead file (1 of them " \
+           "on links to a win page); 1 pages carry a tagged link to a win page and earned no leads." in md
+    with open(run / "xco_zero_lead_tags.csv", newline="") as f:
+        zero = list(csv.DictReader(f))
+    assert zero == [{"tag": "TAG_NOLEADS", "pages_carrying": "1", "pages_linking_to_win": "1",
+                     "win_types": "consultation form"}]
+    data = json.loads((run / "report.json").read_text())
+    assert (data["leads"]["leads_untagged"], data["leads"]["leads_all"]) == (75, 113)

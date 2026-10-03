@@ -35,7 +35,7 @@ from pathcrawl.dead import dead_annotations, dead_links, dead_pages, dead_sectio
 from pathcrawl.dead import write_csv as write_dead_csv
 from pathcrawl.health import health_annotations, health_section, page_health
 from pathcrawl.health import write_csv as write_health_csv
-from pathcrawl.leads import lead_annotations, lead_section
+from pathcrawl.leads import lead_annotations, lead_section, write_zero_lead_csv, zero_lead_tags
 
 DEFINITIONS = {
     "click": "Following one link. A path of N clicks visits N+1 pages.",
@@ -805,6 +805,9 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
         annotations.add_nodes({"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0}, lead_nodes)
         annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
         extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
+        zero_path = out / f"{run.config.client.slug}_zero_lead_tags.csv"
+        write_zero_lead_csv(zero_lead_tags(store, run.graph), zero_path)
+        paths[zero_path.name] = zero_path
         report["leads"] = {k: v for k, v in (store.meta("leads") or {}).items() if k not in ("tags", "conversion_pages")}
     dead_nodes, dead_edges = dead_annotations(store)
     annotations.add_nodes({"is_dead": False, "dead_reason": "", "inbound_dead_links": 0, "dead_inbound_pages": 0,

@@ -28,7 +28,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from pathcrawl.normalize import normalize_conversion_url
+from pathcrawl.normalize import clean_tag, normalize_conversion_url
 
 REQUIRED_COLUMNS = ("wt_mc_id", "leads_most_recent_tag")
 OPTIONAL_COLUMNS = ("leads_source_initiative_tag", "paid_click_leads", "main_conversion_page")
@@ -75,9 +75,17 @@ def _number(value: str | None, where: str) -> float:
         raise LeadFileError(f"{where}: {value!r} is not a number") from None
 
 
-def load_lead_tags(paths: list[Path]) -> dict[str, TagLeads]:
-    """Aggregated lead counts per tag, summed over every file."""
-    out: dict[str, TagLeads] = {}
+class LeadTags(dict):
+    """Lead counts per tag (``dict[str, TagLeads]``), plus the leads in rows
+    with no tag (``untagged``), which can't be joined to any link."""
+
+    untagged: float = 0.0
+
+
+def load_lead_tags(paths: list[Path]) -> LeadTags:
+    """Aggregated lead counts per tag, summed over every file. Tags are cleaned
+    (whitespace and leading commas removed) before they are used."""
+    out = LeadTags()
     for path in paths:
         try:
             f = open(path, newline="", encoding="utf-8-sig")
@@ -103,10 +111,11 @@ def load_lead_tags(paths: list[Path]) -> dict[str, TagLeads]:
                     raise LeadFileError(f"{path} contains visitor tokens; use the aggregated tag file only")
                 if any(EMAIL_VALUE.match(v) for v in row.values()):
                     raise LeadFileError(f"{path} contains e-mail addresses; use the aggregated tag file only")
-                tag = row.get("wt_mc_id", "")
-                if not tag:
-                    continue
+                tag = clean_tag(row.get("wt_mc_id"))
                 where = f"{path.name} line {n}"
+                if not tag:
+                    out.untagged += _number(row.get("leads_most_recent_tag"), where)
+                    continue
                 t = out.setdefault(tag, TagLeads(tag))
                 leads = _number(row.get("leads_most_recent_tag"), where)
                 t.leads += leads
@@ -162,7 +171,10 @@ def tagged_links(store) -> dict[str, dict[str, dict[str, set[str]]]]:
     """mc_id -> src -> {"targets": {...}, "regions": {...}} for every tagged link."""
     out: dict[str, dict[str, dict[str, set[str]]]] = defaultdict(lambda: defaultdict(lambda: {"targets": set(), "regions": set()}))
     for r in store.db.execute("SELECT src, url, href, region, mc_id FROM links WHERE mc_id IS NOT NULL"):
-        entry = out[r["mc_id"]][r["src"]]
+        tag = clean_tag(r["mc_id"])
+        if not tag:
+            continue
+        entry = out[tag][r["src"]]
         target = store.resolve(r["url"]) if r["url"] else (r["href"] or "")
         if target:
             entry["targets"].add(target)
@@ -226,7 +238,9 @@ def save(store, result: LeadResult, files: list[str]) -> None:
         "lead_tags": len(result.lead_tags),
         "lead_tags_matched_exact": sum(1 for t in matched if t.join == "exact"),
         "lead_tags_matched_fallback": sum(1 for t in matched if t.join == "fallback"),
-        "leads_total": sum(t.leads for t in result.lead_tags.values()),
+        "leads_total": sum(t.leads for t in result.lead_tags.values()),  # tagged leads
+        "leads_untagged": getattr(result.lead_tags, "untagged", 0.0),
+        "leads_all": sum(t.leads for t in result.lead_tags.values()) + getattr(result.lead_tags, "untagged", 0.0),
         "leads_matched": sum(t.leads for t in matched),
         "paid_click_leads": sum(t.paid_click_leads for t in result.lead_tags.values()),
         # per-tag outcome without counts below the line: kept for the report
@@ -317,13 +331,17 @@ def lead_section(store, g, min_cell: int, short) -> list[str]:
     L.append(
         f"{meta.get('lead_tags', 0)} tags in the lead file ({', '.join(Path(f).name for f in meta.get('files', []))}); "
         f"{meta.get('lead_tags_matched_exact', 0)} match a crawled link tag exactly and "
-        f"{meta.get('lead_tags_matched_fallback', 0)} after dropping a numeric suffix. They cover "
-        f"{_n(matched)} of {_n(total)} tagged leads ({round(100 * matched / total) if total else 0}%). "
+        f"{meta.get('lead_tags_matched_fallback', 0)} after dropping a numeric suffix. **They cover "
+        f"{_n(matched)} of {_n(total)} tagged leads ({round(100 * matched / total) if total else 0}%).** "
         "Each tag's leads are split evenly over the pages carrying it: exact when one page carries the tag, "
         f"shared otherwise. Leads with a paid click ID: {_n(meta.get('paid_click_leads', 0))} "
         f"({round(100 * meta.get('paid_click_leads', 0) / total) if total else 0}%). Tags with fewer than "
         f"{min_cell} leads are rolled up in this report; full detail is in the run folder's lead_attribution CSV."
     )
+    L.append("")
+    L.append(f"- Tagged leads (a tag in the lead file): {_n(total)}")
+    L.append(f"- Untagged leads (no tag, so they can't be joined to a link): {_n(meta.get('leads_untagged', 0))}")
+    L.append(f"- All leads in the file: {_n(meta.get('leads_all', total))}")
     L.append("")
 
     origin: dict[str, dict[str, float]] = defaultdict(lambda: {"all": 0.0, "exact": 0.0})
@@ -386,4 +404,62 @@ def lead_section(store, g, min_cell: int, short) -> list[str]:
                  + f" Tags on those links: {len(win_tags)}; with leads: {len(win_tags & with_leads)}, without leads "
                  f"in the lead file: {len(win_tags - with_leads)}.")
     L.append("")
+    zero = zero_lead_tags(store, g)
+    unrewarded = pages_with_unrewarded_win_tags(store, g)
+    L.append(f"**Tags that earned no leads:** {len(zero)} tags carried by crawled links have no leads in the lead "
+             f"file ({sum(1 for z in zero if z.pages_linking_to_win)} of them on links to a win page); "
+             f"{len(unrewarded)} pages carry a tagged link to a win page and earned no leads. "
+             "List: the zero_lead_tags CSV.")
+    L.append("")
     return L
+
+
+# --------------------------------------------------------------------------- zero-lead tags
+
+
+@dataclass
+class ZeroLeadTag:
+    tag: str
+    pages_carrying: int
+    pages_linking_to_win: int  # pages where the tag is on a link to a win page
+    win_types: str
+
+
+def zero_lead_tags(store, g) -> list[ZeroLeadTag]:
+    """Tags carried by crawled links that earned no leads in the lead file."""
+    meta = store.meta("leads", {}) or {}
+    with_leads = {lt for t in meta.get("tags", []) if t.get("join") and t.get("leads", 0) > 0
+                  for lt in t.get("link_tags", [])}
+    carriers: dict[str, set[str]] = defaultdict(set)
+    to_win: dict[str, set[str]] = defaultdict(set)
+    types: dict[str, set[str]] = defaultdict(set)
+    for r in store.db.execute("SELECT src, url, mc_id FROM links WHERE mc_id IS NOT NULL"):
+        tag = clean_tag(r["mc_id"])
+        if not tag or tag in with_leads:
+            continue
+        carriers[tag].add(r["src"])
+        target = store.resolve(r["url"]) if r["url"] else None
+        if target in g and g.nodes[target]["win"]:
+            to_win[tag].add(r["src"])
+            types[tag].add(g.nodes[target].get("win_type") or "win")
+    return sorted((ZeroLeadTag(t, len(carriers[t]), len(to_win[t]), ", ".join(sorted(types[t])))
+                   for t in carriers), key=lambda z: (-z.pages_linking_to_win, -z.pages_carrying, z.tag))
+
+
+def pages_with_unrewarded_win_tags(store, g) -> list[str]:
+    """Pages carrying a tagged link to a win page that earned no allocated leads."""
+    earning = {r["src"] for r in store.lead_attribution()}
+    pages = set()
+    for r in store.db.execute("SELECT src, url FROM links WHERE mc_id IS NOT NULL AND url IS NOT NULL"):
+        target = store.resolve(r["url"])
+        if target in g and g.nodes[target]["win"] and r["src"] not in earning:
+            pages.add(r["src"])
+    return sorted(pages)
+
+
+def write_zero_lead_csv(rows: list[ZeroLeadTag], path: Path) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(ZeroLeadTag.__dataclass_fields__))
+        w.writeheader()
+        for r in rows:
+            w.writerow(asdict(r))

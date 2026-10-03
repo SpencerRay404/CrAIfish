@@ -84,6 +84,13 @@ def normalize_url(
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+def clean_tag(value: str | None) -> str:
+    """A campaign tag without surrounding whitespace or leading commas or
+    semicolons (``", ONLINE_X_1"`` -> ``"ONLINE_X_1"``), which otherwise stop it
+    matching the same tag elsewhere."""
+    return (value or "").strip().lstrip(",; ").strip()
+
+
 def _unescape_key(key: str) -> str:
     """``amp;gclsrc`` -> ``gclsrc``: a query written with a literal ``&amp;``
     (HTML-escaped twice) still names the same param."""
@@ -104,9 +111,9 @@ def captured_params(href: str | None, names: Iterable[str]) -> dict[str, str]:
         return {}
     present: dict[str, str] = {}
     for k, v in parse_qsl(query, keep_blank_values=False):
-        k = _unescape_key(k).lower()
-        if v.strip() and k not in present:
-            present[k] = v.strip()
+        k, v = _unescape_key(k).lower(), clean_tag(v)
+        if v and k not in present:
+            present[k] = v
     return {n: present[n.lower()] for n in names if n.lower() in present}
 
 
