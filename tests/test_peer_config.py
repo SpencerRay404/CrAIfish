@@ -87,3 +87,37 @@ def test_off_domain_destination_is_a_node_never_fetched(tmp_path):
                                                "column": "clicks_to_self_serve"}
     assert data["nodes"][F + "home.html"]["clicks_to_any_win"] == 1
     assert data["nodes"][F + "home.html"]["clicks_to_self_serve"] == 1
+
+
+def test_crawl_coverage_in_report(tmp_path):
+    c = peer_config()
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(c.model_dump()))
+    s = Store(tmp_path / "crawl.db")
+    s.set_meta(status="budget", campaign_id="peer", blocked_hosts=["cdn.fedex.test"])
+    s.add_entry(0, "home", F + "home.html", F + "home.html")
+    s.save_page(PageRecord(url=F + "home.html", status="ok", title="Home", jsonld_types=[]), [])
+    s.save_page(PageRecord(url=F + "rates?zip=1", status="robots"), [])
+    s.save_page(PageRecord(url=F + "private.html", status="robots"), [])
+    s.enqueue(F + "later.html", 3, F + "home.html")
+    s.close()
+    CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
+    data = json.loads((tmp_path / "report.json").read_text())["crawl"]
+    assert data["complete"] is False and data["queued_unvisited"] == 1
+    assert data["robots_skipped_by_host"] == {"www.fedex.test": 2}
+    assert data["robots_skipped_with_query_by_host"] == {"www.fedex.test": 1}
+    assert data["blocked_hosts"] == ["cdn.fedex.test"]
+    assert data["pathcrawl_version"] and len(data["settings_fingerprint"]) == 12
+    md = (tmp_path / "report.md").read_text()
+    assert "**Crawl incomplete** (budget): 1 URLs were still queued" in md
+    assert "www.fedex.test: 2 URLs skipped because robots.txt disallows them (1 of them carry a query string)." in md
+    assert "Blocked (kept refusing requests" in md
+
+
+def test_fingerprint_ignores_display_settings():
+    from pathcrawl.report import settings_fingerprint
+
+    a, b = peer_config(), peer_config()
+    b.crawl.headed, b.crawl.slow_mo_ms = False, 0
+    assert settings_fingerprint(a) == settings_fingerprint(b)
+    b.crawl.delay_ms = 1
+    assert settings_fingerprint(a) != settings_fingerprint(b)

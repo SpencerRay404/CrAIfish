@@ -406,6 +406,19 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     add("")
     add(f"> {headline(analysis, win_name)}")
     add("")
+    cov = crawl_coverage(run)
+    if cov["complete"]:
+        add(f"- Crawl complete: every in-scope URL found was visited.")
+    else:
+        add(f"- **Crawl incomplete** ({store.meta('status')}): {cov['queued_unvisited']} URLs were still queued when "
+            "it stopped, so depth figures understate how deep the site goes.")
+    for host, n in sorted(cov["robots_skipped_by_host"].items()):
+        q = cov["robots_skipped_with_query_by_host"].get(host, 0)
+        add(f"- {host}: {n} URL{'s' if n != 1 else ''} skipped because robots.txt disallows them"
+            + (f" ({q} of them carry a query string)" if q else "") + ".")
+    if cov["blocked_hosts"]:
+        add(f"- Blocked (kept refusing requests, so the crawl stopped there; not a finding about the site): "
+            f"{', '.join(cov['blocked_hosts'])}.")
     merged = store.meta("merged_pages", []) or []
     if merged:
         add(f"- {sum(1 for g in merged if len(g) > 1)} pages were stored under more than one URL (differing only "
@@ -567,6 +580,44 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
         add(f"- **{term}**: {text}")
     add("")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- crawl coverage
+
+
+def settings_fingerprint(config) -> str:
+    """A short hash of the settings that must match across sites compared:
+    crawl limits and politeness, health checks and the normalization rules."""
+    import hashlib
+
+    crawl = config.crawl.model_dump(exclude={"headed", "slow_mo_ms", "screenshot"})
+    health = config.health.model_dump(exclude={"home_url"})
+    blob = json.dumps({"crawl": crawl, "health": health}, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+def crawl_coverage(run) -> dict:
+    """Is the crawl complete, what is still queued, and what robots.txt or a
+    refusing host kept out, per host."""
+    from pathcrawl import __version__
+
+    store = run.store
+    robots, robots_q = Counter(), Counter()
+    for r in store.db.execute("SELECT url FROM pages WHERE status = 'robots'"):
+        host = urlsplit(r["url"]).hostname or ""
+        robots[host] += 1
+        if urlsplit(r["url"]).query:
+            robots_q[host] += 1
+    queued = store.pending_count()
+    return {
+        "complete": store.meta("status") == "complete" and queued == 0,
+        "queued_unvisited": queued,
+        "robots_skipped_by_host": dict(robots),
+        "robots_skipped_with_query_by_host": dict(robots_q),
+        "blocked_hosts": store.meta("blocked_hosts", []) or [],
+        "pathcrawl_version": __version__,
+        "settings_fingerprint": settings_fingerprint(run.config),
+    }
 
 
 # --------------------------------------------------------------------------- archetypes
@@ -805,6 +856,7 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
             "pages_by_status": statuses,
             "max_depth": run.config.crawl.max_depth,
             "max_pages": run.config.crawl.max_pages,
+            **crawl_coverage(run),
         },
         "entry_links": [{**dict(r), "requested_url": run.config.scope.normalize(r["requested_url"]) or r["requested_url"]}
                         for r in store.entries()],

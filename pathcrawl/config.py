@@ -349,6 +349,13 @@ class CrawlConfig(_Strict):
     respect_robots: bool = True
     page_timeout_ms: int = Field(default=30000, ge=1000)
     screenshot: bool = True
+    # On HTTP 403 or 429: wait backoff_s (then twice as long, ...) and retry,
+    # up to backoff_retries times. 0 = no waiting (ask the operator, or skip).
+    backoff_s: float = Field(default=0, ge=0)
+    backoff_retries: int = Field(default=2, ge=0)
+    # After this many pages in a row on one host still refused (403/429), stop
+    # crawling that host: its remaining URLs are recorded as host_blocked.
+    host_block_limit: int = Field(default=5, ge=1)
 
 
 class LeadFile(_Strict):
