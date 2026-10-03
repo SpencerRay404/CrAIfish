@@ -507,25 +507,39 @@ class Crawler:
             html=page.content(),
         )
 
-    def _dismiss_consent(self, page) -> bool:
+    def _dismiss_consent(self, page, wait_ms: int = 5000) -> bool:
         """Click a known consent button if one is showing. Returns False if a
-        known banner is still visible afterwards."""
-        for sel in CONSENT_BUTTONS:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible():
-                    btn.click(timeout=3000)
-                    page.wait_for_timeout(500)
-                    break
-            except Exception:
-                continue
+        known banner is still visible afterwards.
+
+        Banners slide in and fade out, so a button may not be clickable yet and
+        a clicked banner may take a moment to go. While a banner is showing,
+        keep trying for up to ``wait_ms``; a page with no banner costs nothing.
+        """
+        deadline = time.monotonic() + wait_ms / 1000
+        while True:
+            for sel in CONSENT_BUTTONS:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible():
+                        btn.click(timeout=3000)
+                        break
+                except Exception:
+                    continue
+            if not self._banner_showing(page):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(250)
+
+    @staticmethod
+    def _banner_showing(page) -> bool:
         for sel in CONSENT_BANNERS:
             try:
                 if page.locator(sel).first.is_visible():
-                    return False
+                    return True
             except Exception:
                 continue
-        return True
+        return False
 
     def _describe_download(self, url: str) -> str:
         """What the server sent instead of a page, as evidence for the report."""

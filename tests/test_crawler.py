@@ -545,6 +545,22 @@ def test_consent_banner_is_dismissed(make_site, tmp_path):
     assert [p.kind for p in op.problems] == []
 
 
+def test_slow_consent_banner_is_dismissed(make_site, tmp_path):
+    """The button appears late and the banner fades out slowly after the click
+    (OneTrust on ups.com); neither counts as a stuck banner."""
+    banner = (
+        '<div id="onetrust-banner-sdk">We use cookies</div><script>'
+        "setTimeout(() => { const b = document.createElement('button'); b.id = 'onetrust-reject-all-handler';"
+        " b.textContent = 'Reject'; b.onclick = () => setTimeout(() =>"
+        " { document.getElementById('onetrust-banner-sdk').style.display = 'none'; b.remove(); }, 1200);"
+        " document.getElementById('onetrust-banner-sdk').appendChild(b); }, 600);</script>"
+    )
+    site = make_site({"/start.html": (200, {}, html(NAV + banner)), "/win.html": WIN})
+    op = ScriptedOperator([])
+    crawl(config_for(site, ["/start.html"]), tmp_path, op)
+    assert [p.kind for p in op.problems] == []
+
+
 def test_stuck_consent_banner_prompts_operator(make_site, tmp_path):
     banner = '<div id="onetrust-banner-sdk">We use cookies and there is no button.</div>'
     site = make_site({"/start.html": (200, {}, html(NAV + banner)), "/win.html": WIN})
