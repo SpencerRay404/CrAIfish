@@ -112,7 +112,8 @@ def test_report_lists_win_types_and_reasons(tmp_path):
     md = (d / "report.md").read_text()
     assert (f"- Win page {S}sbr-signup-ussp-page.html (White papers & reports): matched by address, not read "
             "(win page not fetched: blocked by robots.txt)") in md
-    assert f"{S}unlinked-ussp-page.html (White papers & reports): win page not fetched: listed in win.known_pages" in md
+    assert f"{S}unlinked-ussp-page.html (White papers & reports): matched by address, not read (win page not fetched: " \
+           "listed in win.known_pages" in md
     data = json.loads((d / "report.json").read_text())
     types = {w["url"]: (w["win_type"], w["win_source"]) for w in data["win_pages"]}
     assert types[S + "virtual-consultation-us-en-v4.html"] == ("Virtual consultation", "known")
