@@ -40,10 +40,10 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from statistics import median
 from urllib.parse import urlsplit
-from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
 
 from pathcrawl.extract import BODY, h1_counts
+from pathcrawl.robots import Robots
 
 AI_CRAWLERS = [
     "GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User", "anthropic-ai",
@@ -242,16 +242,9 @@ def _text(body: bytes) -> str:
 
 def robots_ai_rules(robots_txt: str, base: str, ai_crawlers: list[str]) -> dict[str, dict]:
     """For each AI crawler: whether robots.txt names it, and whether it may fetch the home page."""
-    named = {m.lower() for m in re.findall(r"(?im)^\s*user-agent\s*:\s*(\S+)", robots_txt)}
-    rp = RobotFileParser()
-    rp.parse(robots_txt.splitlines())
-    out = {}
-    for bot in ai_crawlers:
-        out[bot] = {
-            "named": bot.lower() in named,
-            "allowed_home": rp.can_fetch(bot, base.rstrip("/") + "/"),
-        }
-    return out
+    rp = Robots(robots_txt)
+    return {bot: {"named": rp.named(bot), "allowed_home": rp.allowed(bot, base.rstrip("/") + "/")}
+            for bot in ai_crawlers}
 
 
 def _sitemap_urls(fetch: Fetch, start: list[str], errors: list[str]) -> tuple[set[str], int, list[str]]:

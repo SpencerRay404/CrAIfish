@@ -407,6 +407,20 @@ def test_linked_win_urls_are_checked_not_loaded(make_site, tmp_path):
     assert page_row(c, site.base + "/win.html")["status"] == "not_fetched"  # checked, never loaded as a page
 
 
+def test_wildcard_robots_rules_are_honoured(make_site, tmp_path):
+    """A FedEx-style file: "Allow: /" first, then "Disallow: /*?*". Every URL
+    with a query string must be skipped and counted, not crawled."""
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\nDisallow: /*?*\n"),
+        "/start.html": (200, {}, html('<a href="/a.html?ref=nav">a</a><a href="/b.html">b</a>')),
+        "/b.html": (200, {}, html("<p>b</p>")),
+    })
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    assert page_row(c, site.base + "/a.html?ref=nav")["status"] == "robots"
+    assert page_row(c, site.base + "/b.html")["status"] == "ok"
+    assert not any(r.startswith("/a.html") for r in site.requests)
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)

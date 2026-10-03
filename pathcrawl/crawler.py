@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
-from urllib.robotparser import RobotFileParser
 
 from rich.console import Console
 from rich.markup import escape
@@ -33,7 +32,10 @@ from rich.prompt import Prompt
 
 from pathcrawl.config import CampaignConfig, Config
 from pathcrawl.extract import detect_block, detect_dead, extract_links, extract_page, visible_text
+from pathcrawl.robots import Robots
 from pathcrawl.store import LinkRecord, PageRecord, Store
+
+ROBOTS_AGENT = "pathcrawl"  # the user-agent token robots.txt groups are matched against
 
 # --------------------------------------------------------------------------- operator
 
@@ -194,7 +196,7 @@ class RobotsCache:
     def __init__(self, request_context, enabled: bool):
         self.request = request_context
         self.enabled = enabled
-        self.parsers: dict[str, RobotFileParser] = {}
+        self.parsers: dict[str, Robots] = {}
 
     def allowed(self, url: str) -> bool:
         if not self.enabled:
@@ -202,19 +204,18 @@ class RobotsCache:
         scheme = url.split("://", 1)[0]
         origin = f"{scheme}://{url.split('://', 1)[1].split('/', 1)[0]}"
         if origin not in self.parsers:
-            parser = RobotFileParser()
             try:
                 resp = self.request.get(origin + "/robots.txt", timeout=15000)
                 if resp.status in (401, 403):
-                    parser.disallow_all = True
+                    parser = Robots(disallow_all=True)
                 elif resp.status >= 400:
-                    parser.allow_all = True
+                    parser = Robots(allow_all=True)
                 else:
-                    parser.parse(resp.text().splitlines())
+                    parser = Robots(resp.text())
             except Exception:
-                parser.allow_all = True  # unreachable robots.txt: treat as no rules
+                parser = Robots(allow_all=True)  # unreachable robots.txt: treat as no rules
             self.parsers[origin] = parser
-        return self.parsers[origin].can_fetch("pathcrawl", url)
+        return self.parsers[origin].allowed(ROBOTS_AGENT, url)
 
 
 # --------------------------------------------------------------------------- crawler
