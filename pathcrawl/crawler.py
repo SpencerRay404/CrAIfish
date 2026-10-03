@@ -41,6 +41,14 @@ ROBOTS_AGENT = "pathcrawl"  # the user-agent token robots.txt groups are matched
 
 BLOCKED = "blocked"
 NAV_ERROR = "navigation error"
+# Network errors a bot wall answers with instead of a 403 (Akamai on dhl.com
+# drops the HTTP/2 stream). Treated like a 403/429: back off, then stop the host.
+REFUSAL_ERRORS = (
+    "ERR_HTTP2_PROTOCOL_ERROR",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_EMPTY_RESPONSE",
+)
 OFFSITE_REDIRECT = "entry link left the allowlist"
 NO_LINKS = "no crawlable links"
 CONSENT = "consent banner"
@@ -588,10 +596,31 @@ class Crawler:
     def _win_source(self, url: str) -> str:
         return "known" if self.config.win.known_page(url) else "pattern"
 
+    def _refused(self, url: str, depth: int, host: str, refusals: int, label, reason: str) -> str:
+        """A page the host refused (403/429 or a dropped connection). Wait and
+        retry ("retry"); after the retries, count it against the host and stop
+        the host once it has refused ``host_block_limit`` pages in a row
+        ("blocked"); otherwise let the caller record the page ("refused")."""
+        cc = self.config.crawl
+        if cc.backoff_s and refusals < cc.backoff_retries:
+            wait = cc.backoff_s * (2 ** refusals)
+            self._log(depth, label, url, f"refused; waiting {wait:g} s before retry {refusals + 1}")
+            time.sleep(wait)
+            return "retry"
+        self.host_refusals[host] = self.host_refusals.get(host, 0) + 1
+        if self.host_refusals[host] >= cc.host_block_limit:
+            self.blocked_hosts.add(host)
+            self.store.set_meta(blocked_hosts=sorted(self.blocked_hosts))
+            self._log(depth, "blocked", url, f"{host} refused {self.host_refusals[host]} pages in a row; "
+                      "stopping that host (reported as blocked, not as a finding about the site)")
+            self._save_failed(url, depth, "host_blocked", reason)
+            return "blocked"
+        return "refused"
+
     def _process(self, url: str, depth: int) -> None:
         host = url.split("/")[2] if "://" in url else ""
         if host in self.blocked_hosts:
-            self._save_failed(url, depth, "host_blocked", f"{host} kept refusing requests (HTTP 403/429); not fetched")
+            self._save_failed(url, depth, "host_blocked", f"{host} kept refusing requests (HTTP 403/429 or dropped connections); not fetched")
             return
         is_entry = self.store.is_entry(url)
         # A URL matching the win patterns is a win whether or not it can be loaded.
@@ -623,6 +652,14 @@ class Crawler:
                     kind, detail = DOWNLOAD, self._describe_download(url)
                 else:
                     kind, detail = NAV_ERROR, str(e).splitlines()[0]
+                    code = next((c for c in REFUSAL_ERRORS if c in detail), None)
+                    if code:
+                        outcome = self._refused(url, depth, host, refusals, code, f"refused: {code}")
+                        if outcome == "retry":
+                            refusals += 1
+                            continue
+                        if outcome == "blocked":
+                            return
                 d = self._ask(Problem(kind, url, detail, loaded=False))
                 if d.action == RETRY:
                     continue
@@ -656,20 +693,11 @@ class Crawler:
             data = extract_page(visit.html, final, self.config.win.form_selector)
             block = detect_block(visit.http_status, data.title, data.text)
             if block and visit.http_status in (403, 429):
-                cc = self.config.crawl
-                if cc.backoff_s and refusals < cc.backoff_retries:
-                    wait = cc.backoff_s * (2 ** refusals)
+                outcome = self._refused(url, depth, host, refusals, visit.http_status, f"blocked: {block}")
+                if outcome == "retry":
                     refusals += 1
-                    self._log(depth, visit.http_status, url, f"refused; waiting {wait:g} s before retry {refusals}")
-                    time.sleep(wait)
                     continue
-                self.host_refusals[host] = self.host_refusals.get(host, 0) + 1
-                if self.host_refusals[host] >= cc.host_block_limit:
-                    self.blocked_hosts.add(host)
-                    self.store.set_meta(blocked_hosts=sorted(self.blocked_hosts))
-                    self._log(depth, "blocked", url, f"{host} refused {self.host_refusals[host]} pages in a row; "
-                              "stopping that host (reported as blocked, not as a finding about the site)")
-                    self._save_failed(url, depth, "host_blocked", f"blocked: {block}")
+                if outcome == "blocked":
                     return
             elif not block:
                 self.host_refusals[host] = 0

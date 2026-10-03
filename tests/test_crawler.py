@@ -390,6 +390,37 @@ def test_refusing_host_is_backed_off_then_stopped(make_site, tmp_path, monkeypat
     assert c.store.meta("blocked_hosts") == [site.base.split("//")[1]]
 
 
+def test_dropped_connections_count_as_refusals(make_site, tmp_path, monkeypatch):
+    """A bot wall that drops the connection (ERR_HTTP2_PROTOCOL_ERROR on dhl.com)
+    is backed off and stops the host, like a 403/429."""
+    import pathcrawl.crawler as crawler_mod
+
+    sleeps = []
+    monkeypatch.setattr(crawler_mod.time, "sleep", lambda s: sleeps.append(s))
+    site = make_site({
+        "/start.html": (200, {}, html("".join(f'<a href="/p{i}.html">p</a>' for i in range(4)))),
+        **{f"/p{i}.html": (200, {}, html("fine")) for i in range(4)},
+    })
+    real = Crawler._visit_with_reset
+    attempts = []
+
+    def visit(self, url):
+        if "/p" in url:
+            attempts.append(url)
+            raise RuntimeError(f"Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at {url}")
+        return real(self, url)
+
+    monkeypatch.setattr(Crawler, "_visit_with_reset", visit)
+    cfg = config_for(site, ["/start.html"], backoff_s=5, backoff_retries=1, host_block_limit=2)
+    c, status = crawl(cfg, tmp_path)
+    assert status == "complete"
+    assert sleeps.count(5) == 2 and len(attempts) == 4  # two pages, each tried twice, then the host stops
+    statuses = {r["url"].rsplit("/", 1)[1]: r["status"] for r in c.store.pages()}
+    assert statuses == {"start.html": "ok", "p0.html": "skipped", "p1.html": "host_blocked",
+                        "p2.html": "host_blocked", "p3.html": "host_blocked"}
+    assert c.store.meta("blocked_hosts") == [site.base.split("//")[1]]
+
+
 def test_linked_win_urls_are_checked_not_loaded(make_site, tmp_path):
     site = make_site({
         "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: *\nDisallow: /blocked-win.html\n"),
