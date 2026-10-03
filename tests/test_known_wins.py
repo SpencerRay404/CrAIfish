@@ -121,7 +121,8 @@ def test_report_lists_win_types_and_reasons(tmp_path):
 
     assert "Win pages by type (crawled pages linking straight to one): consultation form: 0 pages" not in md
     assert "Virtual consultation: 1 page, 1 linking; White papers & reports: 2 pages, 1 linking." in md
-    assert data["win_types"]["Virtual consultation"] == {"win_pages": 1, "pages_linking_directly": 1,
+    assert data["win_types"]["Virtual consultation"] == {"counts_as_win": True, "win_pages": 1,
+                                                         "pages_linking_directly": 1,
                                                          "column": "clicks_to_virtual_consultation"}
     assert data["nodes"][B + "a"]["clicks_to_virtual_consultation"] == 1
     assert data["nodes"][B + "a"]["clicks_to_any_win"] == 1

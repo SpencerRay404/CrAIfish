@@ -372,6 +372,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             page_type=c.page_type if c else "",
             status=g.nodes[n].get("status") or "",
             win_type=g.nodes[n].get("win_type") or "",
+            conversion_class=g.nodes[n].get("conversion_class") or "",
             external=bool(g.nodes[n].get("external")),
             **(annotations.node(n) if annotations else {}),
             viz={
@@ -427,7 +428,8 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     if types:
         add("")
         add("Win pages by type (crawled pages linking straight to one): " + "; ".join(
-            f"{t}: {v['win_pages']} page{'s' if v['win_pages'] != 1 else ''}, {v['pages_linking_directly']} linking"
+            f"{t}{'' if v['counts_as_win'] else ' (not counted as a win)'}: {v['win_pages']} "
+            f"page{'s' if v['win_pages'] != 1 else ''}, {v['pages_linking_directly']} linking"
             for t, v in sorted(types.items())) + ".")
     misses = near_misses(run)
     if misses:
@@ -601,6 +603,8 @@ def win_type_distances(g) -> tuple[dict[str, dict], dict[str, dict]]:
     for n, d in g.nodes(data=True):
         if d["win"]:
             by_type.setdefault(d.get("win_type") or "win", []).append(n)
+        elif d.get("conversion_class"):  # not a win (e.g. self-serve), reported separately
+            by_type.setdefault(d["conversion_class"], []).append(n)
     nodes: dict[str, dict] = {}
     summary = {}
     columns = [("clicks_to_any_win", None)] + [(f"clicks_to_{_slug(t)}", t) for t in sorted(by_type)]
@@ -610,6 +614,7 @@ def win_type_distances(g) -> tuple[dict[str, dict], dict[str, dict]]:
             nodes.setdefault(n, {})[col] = v
         if wtype is not None:
             summary[wtype] = {
+                "counts_as_win": any(g.nodes[n]["win"] for n in by_type[wtype]),
                 "win_pages": len(by_type[wtype]),
                 "pages_linking_directly": sum(1 for n, v in dist.items() if v == 1 and g.nodes[n]["explored"]),
                 "column": col,
