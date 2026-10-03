@@ -1,0 +1,48 @@
+# Sites in the peer comparison. Set each run: to the run folder after the
+# crawl (or pass --run NAME=DIR to pathcrawl compare). UPS comes first: topic
+# questions are asked relative to it.
+#
+#   pathcrawl compare --sites configs/peers/compare.yaml \
+#     --run UPS=runs/ups/<campaign>/<ts> --run FedEx=runs/fedex/peer-compare/<ts> ...
+#
+# Structure and content only: no traffic or lead data, no conversion claims.
+taxonomy: configs/topics.yaml
+
+sites:
+  - name: UPS
+    config: configs/ups.yaml
+    run: null
+    # Re-slice UPS to the same kind of scope as the peers: business and
+    # small-business shipping, solutions and services, and resource content.
+    # Verify these against the UPS run's sections before comparing.
+    slice:
+      - "^https://www\\.ups\\.com/us/en/business-solutions/"
+      - "^https://www\\.ups\\.com/us/en/small-business"
+      - "^https://www\\.ups\\.com/us/en/supplychain/"
+      - "^https://www\\.ups\\.com/us/en/customized-shipping-logistic-services/"
+      - "^https://www\\.ups\\.com/us/en/services/"
+      - "^https://www\\.ups\\.com/us/en/shipping/"
+      - "^https://www\\.ups\\.com/us/en/healthcare/"
+      - "^https://www\\.ups\\.com/us/en/insights"
+      - "^https://www\\.ups\\.com/us/en/resources"
+      - "^https://about\\.ups\\.com/us/en/our-stories/"
+      - "^https://solutions\\.ups\\.com/"
+  - name: FedEx
+    config: configs/peers/fedex.yaml
+    run: null
+  - name: DHL
+    config: configs/peers/dhl.yaml
+    run: null
+  - name: Flexport
+    config: configs/peers/flexport.yaml
+    run: null
+    none_found:
+      # pages read during planning; none was a dedicated talk-to-sales page
+      talk_to_sales: ["https://www.flexport.com/get-started/", "https://www.flexport.com/rates/",
+                      "https://www.flexport.com/logistics/rtq-custom-quote/"]
+  - name: Maersk
+    config: configs/peers/maersk.yaml
+    run: null
+    none_found:
+      talk_to_sales: ["https://www.maersk.com/onlinequote/", "https://www.maersk.com/support/chat/",
+                      "https://www.maersk.com/support/case-management/"]

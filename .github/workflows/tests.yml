@@ -30,4 +30,5 @@ jobs:
           pathcrawl validate --config configs/example.yaml
           pathcrawl validate --config configs/ups.yaml
           pathcrawl validate --config configs/demo.yaml
-          for t in configs/*.entities.yaml; do pathcrawl entities check --taxonomy "$t"; done
+          for t in configs/*.entities.yaml configs/topics.yaml; do pathcrawl entities check --taxonomy "$t"; done
+          for c in configs/peers/fedex.yaml configs/peers/dhl.yaml configs/peers/flexport.yaml configs/peers/maersk.yaml; do pathcrawl validate --config "$c"; done

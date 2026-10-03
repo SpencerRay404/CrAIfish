@@ -390,6 +390,23 @@ def test_refusing_host_is_backed_off_then_stopped(make_site, tmp_path, monkeypat
     assert c.store.meta("blocked_hosts") == [site.base.split("//")[1]]
 
 
+def test_linked_win_urls_are_checked_not_loaded(make_site, tmp_path):
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: *\nDisallow: /blocked-win.html\n"),
+        "/start.html": (200, {}, html('<a href="/win.html">a</a><a href="/blocked-win.html">b</a>'
+                                      '<a href="https://forms.elsewhere.test/book">c</a>')),
+        "/win.html": WIN,
+    })
+    cfg = config_for(site, ["/start.html"])
+    cfg.win.url_patterns = [site.base + "/win.html", site.base + "/blocked-win.html", "https://forms.elsewhere.test/*"]
+    c, _ = crawl(cfg, tmp_path)
+    checks = c.store.meta("win_checks")
+    assert checks[site.base + "/win.html"]["check"] == "HTTP 200" and checks[site.base + "/win.html"]["ok"]
+    assert checks[site.base + "/blocked-win.html"]["check"] == "not checked: robots.txt disallows it"
+    assert checks["https://forms.elsewhere.test/book"]["check"].startswith("destination only")
+    assert page_row(c, site.base + "/win.html")["status"] == "not_fetched"  # checked, never loaded as a page
+
+
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
     chain = {f"/p{i}.html": (200, {}, html(f'<a href="/p{i + 1}.html">next</a>')) for i in range(10)}
     site = make_site(chain)
@@ -443,7 +460,8 @@ def test_win_is_terminal_and_not_loaded(make_site, tmp_path):
         "/thanks.html": (200, {}, html(NAV)),
     })
     c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
-    assert "/win.html" not in site.requests  # matched by URL: nothing to load
+    # matched by URL: never loaded as a page; one status check at the end of the crawl
+    assert site.requests.count("/win.html") == 1 and c.store.meta("win_checks")[site.base + "/win.html"]["ok"]
     win = page_row(c, site.base + "/win.html")
     assert win["status"] == "not_fetched" and win["win"] == 1 and win["win_source"] == "pattern"
     assert not c.store.has_page(site.base + "/thanks.html")

@@ -297,7 +297,7 @@ def site_bases(crawled_urls: list[str], allowed_domains: list[str]) -> list[str]
 
 
 def collect_site_signals(bases: list[str], fetch: Fetch, crawled_urls: list[str], normalize,
-                         ai_crawlers: list[str] | None = None) -> dict[str, dict]:
+                         ai_crawlers: list[str] | None = None, in_scope=None) -> dict[str, dict]:
     """robots.txt AI rules, llms.txt and sitemap coverage per site (``scheme://host[:port]``)."""
     ai_crawlers = ai_crawlers or AI_CRAWLERS
     out = {}
@@ -339,6 +339,11 @@ def collect_site_signals(bases: list[str], fetch: Fetch, crawled_urls: list[str]
             "crawled_pages": len(on_host),
             # never a coverage figure from a sitemap that couldn't be read
             "crawled_pages_in_sitemap": sum(1 for u in on_host if u in sm_norm) if sitemap_state == READ else None,
+            # in-scope URLs the sitemap lists that the link crawl never reached
+            "sitemap_not_crawled": len(missed := sorted(
+                u for u in sm_norm if urlsplit(u).netloc == host and u not in set(on_host)
+                and (in_scope is None or in_scope(u)))) if sitemap_state == READ else None,
+            "sitemap_not_crawled_sample": missed[:20] if sitemap_state == READ else [],
             "errors": errors[:10],
         }
     return out

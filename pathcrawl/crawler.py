@@ -367,11 +367,54 @@ class Crawler:
         try:
             crawled = [r["url"] for r in self.store.db.execute(
                 "SELECT url FROM pages WHERE status IN ('ok', 'http_error')")]
-            signals = collect_site_signals(site_bases(crawled, self.scope.allowed_domains), playwright_fetch(request), crawled, self.scope.normalize,
-                                           self.config.health.ai_crawlers or None)
+            signals = collect_site_signals(site_bases(crawled, self.scope.allowed_domains), playwright_fetch(request),
+                                           crawled, self.scope.normalize, self.config.health.ai_crawlers or None,
+                                           self.scope.in_scope)
             self.store.set_meta(site_signals=signals)
         except Exception as e:  # never lose a finished crawl over this
             self.console.print(f"[yellow]Site files not checked: {escape(str(e).splitlines()[0] if str(e) else '')}[/]")
+        try:
+            self.store.set_meta(win_checks=self._win_checks(request))
+        except Exception as e:
+            self.console.print(f"[yellow]Win URLs not checked: {escape(str(e).splitlines()[0] if str(e) else '')}[/]")
+
+    WIN_CHECK_LIMIT = 100
+
+    def _win_checks(self, request) -> dict[str, dict]:
+        """Confirm each win URL a crawled page links to answers, without
+        loading it as a page: one request per URL on an allowed domain that
+        robots.txt permits. Destinations off the allowed domains and URLs
+        robots.txt forbids are recorded, not fetched."""
+        win = self.config.win
+        targets: dict[str, int] = {}
+        for r in self.store.db.execute("SELECT DISTINCT src, url FROM links WHERE url IS NOT NULL"):
+            target = self.store.resolve(r["url"])
+            if win.destination(target):
+                targets[target] = targets.get(target, 0) + 1
+        out = {}
+        for url in sorted(targets)[: self.WIN_CHECK_LIMIT]:
+            cls = win.win_class(url)
+            entry = {"linked_from": targets[url], "class": cls.name if cls else win.win_type(url),
+                     "counts_as_win": win.url_matches(url)}
+            if not self.scope.domain_allowed(url):
+                entry["check"] = "destination only (off the allowed domains, not fetched)"
+            elif not self.robots.allowed(url):
+                entry["check"] = "not checked: robots.txt disallows it"
+            else:
+                try:
+                    resp = request.get(url, timeout=self.config.crawl.page_timeout_ms, max_redirects=5)
+                    entry["check"] = f"HTTP {resp.status}"
+                    entry["ok"] = resp.ok
+                    final = self.scope.normalize(resp.url) if resp.url else None
+                    if final and final != url:
+                        entry["redirects_to"] = final
+                except Exception as e:
+                    entry["check"] = f"error: {(str(e).splitlines() or ['?'])[0][:120]}"
+                    entry["ok"] = False
+                if self.config.crawl.delay_ms:
+                    time.sleep(self.config.crawl.delay_ms / 1000)
+            out[url] = entry
+        return out
 
     def _resume_hint(self, what: str) -> None:
         self.console.print(f"[yellow]{what} Resume with: pathcrawl crawl --resume {escape(str(self.run_dir))}[/]")

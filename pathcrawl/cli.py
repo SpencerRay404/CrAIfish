@@ -625,3 +625,35 @@ def topics(
         console.print(f"Page tags rebuilt from stored data for {added} pages crawled before they were recorded.")
     console.print(f"Topics ({escape(str(taxonomy))}, version {escape(str(s['version']))}, {s['fingerprint']}): "
                   f"{s['pages_tagged']} of {s['pages']} pages tagged, {s['tags']} tags.", highlight=False, soft_wrap=True)
+
+
+@app.command("compare")
+def compare_cmd(
+    sites: Path = typer.Option(Path("configs/peers/compare.yaml"), "--sites", help="Comparison file listing the sites."),
+    run: list[str] = typer.Option([], "--run", help="NAME=RUN_DIR for a site (overrides run: in the file). Repeatable."),
+    out: Path = typer.Option(Path("compare"), "--out", help="Folder for the comparison outputs."),
+) -> None:
+    """Compare crawled sites: reachability of a win, depth from home, machine readability, topics and services."""
+    from pathcrawl.compare import compare, load_compare
+
+    runs = {}
+    for item in run:
+        if "=" not in item:
+            err_console.print(f"[bold red]compare:[/] --run takes NAME=RUN_DIR, got {escape(item)}")
+            raise typer.Exit(code=2)
+        name, path = item.split("=", 1)
+        runs[name.strip()] = path.strip()
+    specs, taxonomy = load_compare(sites, runs)
+    try:
+        results, paths = compare(specs, taxonomy, out)
+    except FileNotFoundError as e:
+        err_console.print(f"[bold red]compare:[/] {escape(str(e))}")
+        raise typer.Exit(code=2) from None
+    for r in results:
+        s = r.summary
+        console.print(f"{escape(r.name)}: {s['pages']} pages, complete {s['complete']}, clicks to win p50/p90 "
+                      f"{s['win_all']['p50']}/{s['win_all']['p90']}, from home p50/p90 "
+                      f"{s['home_all']['p50']}/{s['home_all']['p90']}" + (" (depth understated)" if s["depth_note"] else ""),
+                      highlight=False, soft_wrap=True)
+    for p in paths.values():
+        console.print(f"  wrote {escape(str(p))}", highlight=False, soft_wrap=True)

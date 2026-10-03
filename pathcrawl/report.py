@@ -416,6 +416,13 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
         q = cov["robots_skipped_with_query_by_host"].get(host, 0)
         add(f"- {host}: {n} URL{'s' if n != 1 else ''} skipped because robots.txt disallows them"
             + (f" ({q} of them carry a query string)" if q else "") + ".")
+    checks = cov["win_checks"]
+    if checks:
+        failed = [u for u, c in checks.items() if c.get("ok") is False]
+        detail = ", ".join(f"{u}: {checks[u]['check']}" for u in failed[:5])
+        add(f"- Win URLs linked from crawled pages: {len(checks)} checked without loading them as pages; "
+            f"{sum(1 for c in checks.values() if c.get('ok'))} answered, {len(failed)} did not"
+            + (f" ({detail})" if failed else "") + ".")
     if cov["blocked_hosts"]:
         add(f"- Blocked (kept refusing requests, so the crawl stopped there; not a finding about the site): "
             f"{', '.join(cov['blocked_hosts'])}.")
@@ -615,6 +622,7 @@ def crawl_coverage(run) -> dict:
         "robots_skipped_by_host": dict(robots),
         "robots_skipped_with_query_by_host": dict(robots_q),
         "blocked_hosts": store.meta("blocked_hosts", []) or [],
+        "win_checks": store.meta("win_checks", {}) or {},
         "pathcrawl_version": __version__,
         "settings_fingerprint": settings_fingerprint(run.config),
     }

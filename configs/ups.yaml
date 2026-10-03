@@ -134,9 +134,14 @@ health:
   home_url: "https://www.ups.com/us/en/home"
 
 crawl:
-  max_depth: 8
-  max_pages: 5000   # pages per run; raise with --max-pages for a bigger map
-  delay_ms: 1500
+  # The same settings as the peer configs (configs/peers/*.yaml), so a UPS run
+  # can be compared with them; pathcrawl compare checks the fingerprint.
+  max_depth: 50
+  max_pages: 5000
+  delay_ms: 1000
+  backoff_s: 30
+  backoff_retries: 2
+  host_block_limit: 5
   headed: true
   slow_mo_ms: 400
   respect_robots: true
