@@ -315,6 +315,23 @@ class LeadsConfig(_Strict):
     allocation: str = "even_split_across_source_pages"
     # report.md rolls tags with fewer leads than this into one line
     min_cell: int = Field(5, ge=1)
+    # A regex with a named group "archetype" that reads the audience archetype
+    # out of a campaign tag, e.g. ONLINE_WEB_<archetype>_..._<id>. Pages get the
+    # archetypes of the tags they carry (node attribute "archetypes").
+    archetype_pattern: str | None = None
+
+    @field_validator("archetype_pattern")
+    @classmethod
+    def _archetype_pattern(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            rx = re.compile(v)
+        except re.error as e:
+            raise ValueError(f"invalid regex: {e}") from None
+        if "archetype" not in rx.groupindex:
+            raise ValueError("needs a named group (?P<archetype>...)")
+        return v
 
     @field_validator("allocation")
     @classmethod

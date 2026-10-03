@@ -360,3 +360,38 @@ def test_whole_number_leads(tmp_path):
     with open(run / "xco_lead_attribution.csv", newline="") as f:
         rows = list(csv.DictReader(f))
     assert {r["leads_whole"] for r in rows} <= {"0", "1", "3"} and all("share" in r for r in rows)
+
+
+def test_audience_archetypes(tmp_path, lead_file):
+    from pathcrawl.config import ConfigError
+    from pathcrawl.leads import archetype_of
+
+    pattern = r"^TAG_(?P<archetype>[A-Z]+)"
+    assert archetype_of("TAG_SHARED", pattern) == "SHARED" and archetype_of("OTHER", pattern) is None
+    assert archetype_of("ONLINE_WEB_Store_Based_Retailers_MktgVirtualConsultationMainPage_1",
+                        r"^ONLINE_WEB_(?P<archetype>.+?)_MktgVirtualConsultationMainPage_\d+$") == "Store Based Retailers"
+    with pytest.raises(ConfigError, match="named group"):
+        parse_config({**make_config().model_dump(), "leads": {"archetype_pattern": "^TAG_(.*)"}})
+
+    run = tmp_path / "run"
+    run.mkdir()
+    build_run(run)
+    cfg = make_config(lead_file)
+    cfg.leads.archetype_pattern = pattern
+    live = tmp_path / "live.yaml"
+    live.write_text(yaml.safe_dump(cfg.model_dump()))
+    result = CliRunner().invoke(app, ["report", "--run", str(run), "--config", str(live)])
+    assert result.exit_code == 0, result.output
+    data = json.loads((run / "report.json").read_text())
+    assert data["archetypes"] == {
+        "NOLEADS": {"tags": 1, "pages": 1, "pages_linking_to_win": 1, "leads_whole": 0},
+        "OLD": {"tags": 1, "pages": 1, "pages_linking_to_win": 0, "leads_whole": 8},  # links to the 2023 page
+        "RETAIL": {"tags": 1, "pages": 1, "pages_linking_to_win": 1, "leads_whole": 12},
+        "SHARED": {"tags": 1, "pages": 2, "pages_linking_to_win": 2, "leads_whole": 10},
+    }
+    assert data["nodes"][B + "auto"]["archetypes"] == "OLD, SHARED"
+    assert data["nodes"][B + "support"]["archetypes"] == ""
+    md = (run / "report.md").read_text()
+    assert "## Audience archetypes" in md and "| SHARED | 1 | 2 | 2 | 10 |" in md
+    g = nx.read_gexf(run / "graph.gexf")
+    assert g.nodes[B + "retail"]["archetypes"] == "RETAIL"

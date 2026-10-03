@@ -504,3 +504,49 @@ def write_zero_lead_csv(rows: list[ZeroLeadTag], path: Path) -> None:
         w.writeheader()
         for r in rows:
             w.writerow(asdict(r))
+
+
+# --------------------------------------------------------------------------- audience archetypes
+
+
+def archetype_of(tag: str, pattern: str | None) -> str | None:
+    """The audience archetype a campaign tag names (``leads.archetype_pattern``)."""
+    if not pattern or not tag:
+        return None
+    m = re.match(pattern, tag)
+    if not m or not m.group("archetype"):
+        return None
+    return m.group("archetype").replace("_", " ").strip()
+
+
+def archetypes(store, g, pattern: str | None) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Per page: the archetypes of the tags its links carry. Per archetype: tags,
+    pages carrying it, pages where it sits on a link to a win page, and whole
+    leads (rounded down, from the stored attribution)."""
+    if not pattern:
+        return {}, {}
+    page_arch: dict[str, set[str]] = defaultdict(set)
+    summary: dict[str, dict] = {}
+    for r in store.db.execute("SELECT src, url, mc_id FROM links WHERE mc_id IS NOT NULL"):
+        a = archetype_of(clean_tag(r["mc_id"]), pattern)
+        if not a:
+            continue
+        page_arch[r["src"]].add(a)
+        s = summary.setdefault(a, {"tags": set(), "pages": set(), "pages_linking_to_win": set(), "leads_share": 0.0})
+        s["tags"].add(clean_tag(r["mc_id"]))
+        s["pages"].add(r["src"])
+        target = store.resolve(r["url"]) if r["url"] else None
+        if target in g and g.nodes[target]["win"]:
+            s["pages_linking_to_win"].add(r["src"])
+    for r in store.lead_attribution():
+        for tag in (r["mc_id"] or "").split(", "):
+            a = archetype_of(tag, pattern)
+            if a and a in summary:
+                value = r["share"] if r["share"] is not None else r["leads_allocated"]
+                summary[a]["leads_share"] += value / max(1, len((r["mc_id"] or "").split(", ")))
+    nodes = {n: {"archetypes": ", ".join(sorted(v))} for n, v in page_arch.items()}
+    out = {a: {"tags": len(s["tags"]), "pages": len(s["pages"]),
+               "pages_linking_to_win": len(s["pages_linking_to_win"]),
+               "leads_whole": _floor(s["leads_share"])}
+           for a, s in sorted(summary.items())}
+    return nodes, out

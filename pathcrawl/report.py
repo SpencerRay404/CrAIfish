@@ -35,7 +35,7 @@ from pathcrawl.dead import dead_annotations, dead_links, dead_pages, dead_sectio
 from pathcrawl.dead import write_csv as write_dead_csv
 from pathcrawl.health import health_annotations, health_section, page_health
 from pathcrawl.health import write_csv as write_health_csv
-from pathcrawl.leads import lead_annotations, lead_section, write_zero_lead_csv, zero_lead_tags
+from pathcrawl.leads import archetypes, lead_annotations, lead_section, write_zero_lead_csv, zero_lead_tags
 
 DEFINITIONS = {
     "click": "Following one link. A path of N clicks visits N+1 pages.",
@@ -567,6 +567,21 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     return "\n".join(L)
 
 
+# --------------------------------------------------------------------------- archetypes
+
+
+def archetype_section(summary: dict[str, dict]) -> list[str]:
+    L = ["## Audience archetypes", "",
+         "Read from the campaign tags on links (leads.archetype_pattern). A page carrying the tag is the page "
+         "the tag sits on; ads may use the same tag, so this is not where the visitor came from.", "",
+         "| archetype | tags | pages carrying it | of which link to a win page | leads (whole) |",
+         "|---|---|---|---|---|"]
+    for a, s in sorted(summary.items(), key=lambda kv: (-kv[1]["pages"], kv[0])):
+        L.append(f"| {a} | {s['tags']} | {s['pages']} | {s['pages_linking_to_win']} | {s['leads_whole']} |")
+    L.append("")
+    return L
+
+
 # --------------------------------------------------------------------------- win types
 
 
@@ -831,6 +846,11 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
                            "clicks_from_home_all_links": -1}, health_annotations(health_rows))
     report["health"] = {"home_url": home, "summary": health_summary, "site_signals": site_signals}
     type_nodes, report["win_types"] = win_type_distances(run.graph)
+    arch_nodes, arch_summary = archetypes(store, run.graph, run.config.leads.archetype_pattern)
+    if arch_summary:
+        annotations.add_nodes({"archetypes": ""}, arch_nodes)
+        report["archetypes"] = arch_summary
+        extra += archetype_section(arch_summary)
     annotations.add_nodes({k: -1 for k in sorted({k for d in type_nodes.values() for k in d})}, type_nodes)
     if store.meta("external_seeds"):
         extra += external_seed_section(run, short)

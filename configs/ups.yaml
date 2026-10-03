@@ -125,6 +125,9 @@ leads:
     fallback: "strip_numeric_suffix"
   allocation: "even_split_across_source_pages"
   min_cell: 5
+  # ONLINE_WEB_<archetype>_MktgVirtualConsultationMainPage_<id>: the audience
+  # archetype UPS targets (confirmed by the data owner).
+  archetype_pattern: "^ONLINE_WEB_(?P<archetype>.+?)_MktgVirtualConsultationMainPage_\\d+$"
 
 # Website health view: click depth is counted from the US home page.
 health:
