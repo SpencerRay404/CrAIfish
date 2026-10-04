@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -206,7 +207,18 @@ def test_shipped_peer_configs():
 
     root = Path(__file__).parent.parent / "configs"
     sites, taxonomy = load_compare(root / "peers" / "compare.yaml")
-    assert [s.name for s in sites] == ["UPS", "FedEx", "DHL", "Flexport", "Maersk"]
+    # DHL is out of this round (its host refused the crawler); its config is still checked below
+    assert [s.name for s in sites] == ["UPS", "FedEx", "Flexport", "Maersk"]
+    rx = {s.name: [re.compile(p) for p in s.slice] for s in sites}
+    assert all(rx.values())  # every site is sliced to the same kind of scope
+    kept = lambda name, url: any(r.match(url) for r in rx[name])  # noqa: E731
+    assert kept("FedEx", "https://www.fedex.com/en-us/shipping/freight.html")
+    assert not kept("FedEx", "https://www.fedex.com/en-us/customer-support/faqs.html")
+    assert kept("Flexport", "https://www.flexport.com/products/ocean-freight/")
+    assert not kept("Flexport", "https://www.flexport.com/data/hs-code/0101/")
+    assert kept("Maersk", "https://www.maersk.com/transportation-services/ocean-transport")
+    assert not kept("Maersk", "https://www.maersk.com/de-de/transportation-services")
+    assert not kept("Maersk", "https://www.maersk.com/news/articles/2026/01/01/x")
     fps = {settings_fingerprint(load_config(Path(__file__).parent.parent / s.config)) for s in sites}
     assert len(fps) == 1  # every site crawled with the same settings
     fedex = load_config(root / "peers" / "fedex.yaml")
