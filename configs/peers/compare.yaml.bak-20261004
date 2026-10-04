@@ -30,27 +30,12 @@ sites:
   - name: FedEx
     config: configs/peers/fedex.yaml
     run: null
-    # Same scope as the UPS slice: leave out customer support, tracking, service
-    # alerts, corporate pages and the trust center. Keeps 613 of 864 pages read.
-    slice:
-      - "^https://www\\.fedex\\.com/en-us/(?!customer-support|about|tracking|service-alerts|trust-center)"
-  # DHL is out of this round: www.dhl.com refused the crawler after about 50
-  # pages in both runs (205 of 266 pages "host blocked"; robots.txt, the
-  # sitemap and all four win-URL checks timed out). Not worked around.
-  # Report it as "blocked, 49 pages read". To bring it back, remove the "#"
-  # marks and set run: to a new run. Substitute site: see the notes in the
-  # report.
-  # - name: DHL
-  #   config: configs/peers/dhl.yaml
-  #   run: null
+  - name: DHL
+    config: configs/peers/dhl.yaml
+    run: null
   - name: Flexport
     config: configs/peers/flexport.yaml
     run: null
-    # The crawl hit its 5,000-page budget with 4,358 pages (87%) under /data/
-    # (HS code listings). Leave them out. Keeps 642 pages, which is only what
-    # the crawl reached before the budget stopped: a floor, not the whole site.
-    slice:
-      - "^https://www\\.flexport\\.com/(?!data/)"
     none_found:
       # pages read during planning; none was a dedicated talk-to-sales page
       talk_to_sales: ["https://www.flexport.com/get-started/", "https://www.flexport.com/rates/",
@@ -58,12 +43,6 @@ sites:
   - name: Maersk
     config: configs/peers/maersk.yaml
     run: null
-    # The crawl covered the whole global site. Keep the English pages with no
-    # locale folder (leaves out 11 locale trees and /local-information/), and
-    # leave out support, news and portal pages to match the UPS slice.
-    # Keeps 602 of 4,985 pages read. The crawl hit its 5,000-page budget.
-    slice:
-      - "^https://www\\.maersk\\.com/(?![a-z]{2}-[a-z]{2}(/|$))(?!local-information/|support/|news/|portaluser/)"
     none_found:
       talk_to_sales: ["https://www.maersk.com/onlinequote/", "https://www.maersk.com/support/chat/",
                       "https://www.maersk.com/support/case-management/"]
