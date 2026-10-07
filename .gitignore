@@ -15,3 +15,8 @@ runs/
 data/**/raw*
 *MKT_TRK*
 *mkt_trk*
+data/ups_linkedin_scrape_review.csv
+data/ups_lead_tags.csv
+data/ups_site_health.csv
+data/ups_touched_urls.csv
+

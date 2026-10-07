@@ -30,11 +30,13 @@ scope:
   locale_exclude: []
   # WT.mc_id is UPS's campaign tracking code; stripping it makes every
   # "Talk With an Expert" link point at the same consultation page.
-  strip_query_params: ["utm_*", "gclid", "fbclid", "li_fat_id", "trk", "WT.*",
-                       "msockid", "_gl", "gbraid", "wbraid"]
-  # WT.mc_id is stripped from page URLs above but kept on each link, so lead
-  # counts can be joined to the link that carried the tag (pathcrawl leads).
-  capture_params: ["WT.mc_id"]
+  # Tracking params never identify a page. campaign_id is one too: pages that
+  # differ only by it are the same page.
+  strip_query_params: ["utm_*", "gclid", "gclsrc", "gbraid", "wbraid", "gad_source", "gad_campaignid",
+                       "fbclid", "mkt_tok", "msockid", "_gl", "li_fat_id", "trk", "WT.*", "campaign_id"]
+  # Stripped from page URLs above but kept on each link (links.params). The
+  # first, WT.mc_id, is also links.mc_id, the key lead counts join on.
+  capture_params: ["WT.mc_id", "campaign_id"]
   region_selectors:
     nav: []
     header: []
@@ -51,6 +53,10 @@ win:
   # export: sbr-signup and the manufacturing white paper.
   known_pages:
     - {url: "https://solutions.ups.com/virtual-consultation-us-en-v4.html", type: "Virtual consultation"}
+    # Two older variants of the consultation form, still linked from the site
+    # (assumed to count as wins, as in the first explorer; confirm with Spence).
+    - {url: "https://solutions.ups.com/virtual-consultation-2023-ussp-page.html", type: "Virtual consultation"}
+    - {url: "https://solutions.ups.com/virtual-consultation-discount-ussp-page.html", type: "Virtual consultation"}
     - {url: "https://solutions.ups.com/consumer-trends-ussp-page.html", type: "White papers & reports"}
     - {url: "https://solutions.ups.com/preparing-for-peak-ussp-page.html", type: "White papers & reports"}
     - {url: "https://solutions.ups.com/circular-economy-ussp-page.html", type: "White papers & reports"}
@@ -119,17 +125,25 @@ leads:
     fallback: "strip_numeric_suffix"
   allocation: "even_split_across_source_pages"
   min_cell: 5
+  # ONLINE_WEB_<archetype>_MktgVirtualConsultationMainPage_<id>: the audience
+  # archetype UPS targets (confirmed by the data owner).
+  archetype_pattern: "^ONLINE_WEB_(?P<archetype>.+?)_MktgVirtualConsultationMainPage_\\d+$"
 
 # Website health view: click depth is counted from the US home page.
 health:
   home_url: "https://www.ups.com/us/en/home"
 
 crawl:
-  max_depth: 8
-  max_pages: 5000   # pages per run; raise with --max-pages for a bigger map
-  delay_ms: 1500
+  # The same settings as the peer configs (configs/peers/*.yaml), so a UPS run
+  # can be compared with them; pathcrawl compare checks the fingerprint.
+  max_depth: 50
+  max_pages: 5000
+  delay_ms: 1000
+  backoff_s: 30
+  backoff_retries: 2
+  host_block_limit: 5
   headed: true
-  slow_mo_ms: 400
+  slow_mo_ms: 0
   respect_robots: true
   page_timeout_ms: 30000
-  screenshot: true
+  screenshot: false

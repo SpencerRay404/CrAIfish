@@ -81,7 +81,20 @@ class ScopeConfig(_Strict):
     # is stripped for node identity, e.g. ["WT.mc_id"]. Names match
     # case-insensitively; the first one present on a link wins.
     capture_params: list[str] = []
+    # Regexes (matched from the start of the URL); when set, a URL is in scope
+    # only if it matches one, e.g. ["^https://www\\.fedex\\.com/en-us/"].
+    include_patterns: list[str] = []
     region_selectors: RegionSelectors = RegionSelectors()
+
+    @field_validator("include_patterns")
+    @classmethod
+    def _check_include(cls, patterns: list[str]) -> list[str]:
+        for p in patterns:
+            try:
+                re.compile(p)
+            except re.error as e:
+                raise ValueError(f"invalid regex in {p!r}: {e}") from None
+        return patterns
 
     @field_validator("allowed_domains")
     @classmethod
@@ -116,9 +129,12 @@ class ScopeConfig(_Strict):
             return True
         return locale_allowed(url, self.locale_include, self.locale_exclude)
 
+    def included(self, url: str) -> bool:
+        return not self.include_patterns or any(re.match(p, url) for p in self.include_patterns)
+
     def in_scope(self, url: str) -> bool:
-        """Allowed domain and passes the locale filters."""
-        return self.domain_allowed(url) and self.locale_allowed(url)
+        """Allowed domain, passes the locale filters and matches include_patterns (if any)."""
+        return self.domain_allowed(url) and self.locale_allowed(url) and self.included(url)
 
 
 @lru_cache(maxsize=65536)
@@ -141,9 +157,39 @@ class KnownWinPage(_Strict):
         return v.strip()
 
 
+class WinClass(_Strict):
+    """A kind of conversion page, matched by regex (from the start of the URL).
+
+    With ``any_win: true`` (talk to sales, quote request, lead onboarding) its
+    pages are wins. With ``any_win: false`` (self-serve rates or booking, or a
+    page still to verify) they are tracked and reported separately but are
+    not wins. A matching URL off the allowed domains (a scheduling tool, a
+    form host) is recorded as the destination of the link and never fetched.
+    """
+
+    name: str = Field(min_length=1)
+    patterns: list[str] = Field(min_length=1)
+    any_win: bool = True
+
+    @field_validator("patterns")
+    @classmethod
+    def _check(cls, patterns: list[str]) -> list[str]:
+        for p in patterns:
+            try:
+                re.compile(p)
+            except re.error as e:
+                raise ValueError(f"invalid regex in {p!r}: {e}") from None
+        return patterns
+
+    def matches(self, url: str) -> bool:
+        return any(re.match(p, url) for p in self.patterns)
+
+
 class WinConfig(_Strict):
     name: str = Field(min_length=1)
-    url_patterns: list[str] = Field(min_length=1)
+    url_patterns: list[str] = []
+    # Conversion classes (see WinClass); wins are the classes with any_win.
+    classes: list[WinClass] = []
     # Further win pages, each with a conversion type, added as win nodes even
     # if the crawl cannot fetch them or no crawled page links to them.
     known_pages: list[KnownWinPage] = []
@@ -180,7 +226,18 @@ class WinConfig(_Strict):
     def _form_required_needs_selector(self) -> WinConfig:
         if self.require_form and not self.form_selector:
             raise ValueError("require_form is true but no form_selector is set")
+        if not (self.url_patterns or self.known_pages or any(c.any_win for c in self.classes)):
+            raise ValueError("no win defined: set url_patterns, known_pages or a class with any_win")
+        names = [c.name for c in self.classes]
+        if len(names) != len(set(names)):
+            raise ValueError("win.classes names must be unique")
         return self
+
+    def win_class(self, url: str) -> WinClass | None:
+        """The first class whose patterns match ``url`` (win or not)."""
+        if self.excluded(url):
+            return None
+        return next((c for c in self.classes if c.matches(url)), None)
 
     def _matches_any(self, url: str, patterns: list[str]) -> bool:
         fold = self.match == "case_insensitive_path"
@@ -212,14 +269,26 @@ class WinConfig(_Strict):
         """
         if self.excluded(url):
             return False
-        return self.known_page(url) is not None or self._matches_any(url, self.url_patterns)
+        if self.known_page(url) is not None or self._matches_any(url, self.url_patterns):
+            return True
+        cls = self.win_class(url)
+        return bool(cls and cls.any_win)
 
     def win_type(self, url: str) -> str | None:
-        """The conversion type of a win URL: its known page's type, else the win name."""
+        """The conversion type of a win URL: its known page's type, its class
+        name, else the win name."""
         if not self.url_matches(url):
             return None
         known = self.known_page(url)
-        return known.type if known else self.name
+        if known:
+            return known.type
+        cls = self.win_class(url)
+        return cls.name if cls and cls.any_win else self.name
+
+    def destination(self, url: str) -> bool:
+        """A conversion page worth keeping as a link target even off the allowed
+        domains (recorded, never fetched): any win, or any class."""
+        return self.url_matches(url) or self.win_class(url) is not None
 
     def keywords(self) -> list[str]:
         """Lowercase words that make a URL look like the win.
@@ -280,6 +349,13 @@ class CrawlConfig(_Strict):
     respect_robots: bool = True
     page_timeout_ms: int = Field(default=30000, ge=1000)
     screenshot: bool = True
+    # On HTTP 403 or 429: wait backoff_s (then twice as long, ...) and retry,
+    # up to backoff_retries times. 0 = no waiting (ask the operator, or skip).
+    backoff_s: float = Field(default=0, ge=0)
+    backoff_retries: int = Field(default=2, ge=0)
+    # After this many pages in a row on one host still refused (403/429), stop
+    # crawling that host: its remaining URLs are recorded as host_blocked.
+    host_block_limit: int = Field(default=5, ge=1)
 
 
 class LeadFile(_Strict):
@@ -315,6 +391,23 @@ class LeadsConfig(_Strict):
     allocation: str = "even_split_across_source_pages"
     # report.md rolls tags with fewer leads than this into one line
     min_cell: int = Field(5, ge=1)
+    # A regex with a named group "archetype" that reads the audience archetype
+    # out of a campaign tag, e.g. ONLINE_WEB_<archetype>_..._<id>. Pages get the
+    # archetypes of the tags they carry (node attribute "archetypes").
+    archetype_pattern: str | None = None
+
+    @field_validator("archetype_pattern")
+    @classmethod
+    def _archetype_pattern(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            rx = re.compile(v)
+        except re.error as e:
+            raise ValueError(f"invalid regex: {e}") from None
+        if "archetype" not in rx.groupindex:
+            raise ValueError("needs a named group (?P<archetype>...)")
+        return v
 
     @field_validator("allocation")
     @classmethod

@@ -75,13 +75,46 @@ def normalize_url(
     strip = list(strip_params)
     params = [
         (k, v)
-        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        for k, v in ((_unescape_key(k), v) for k, v in parse_qsl(parts.query, keep_blank_values=True))
         if not param_is_stripped(k, strip)
     ]
     params.sort(key=lambda kv: kv[0])
     query = urlencode(params)
 
     return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def clean_tag(value: str | None) -> str:
+    """A campaign tag without surrounding whitespace or leading commas or
+    semicolons (``", ONLINE_X_1"`` -> ``"ONLINE_X_1"``), which otherwise stop it
+    matching the same tag elsewhere."""
+    return (value or "").strip().lstrip(",; ").strip()
+
+
+def _unescape_key(key: str) -> str:
+    """``amp;gclsrc`` -> ``gclsrc``: a query written with a literal ``&amp;``
+    (HTML-escaped twice) still names the same param."""
+    while key.lower().startswith("amp;"):
+        key = key[4:]
+    return key
+
+
+def captured_params(href: str | None, names: Iterable[str]) -> dict[str, str]:
+    """Every param in ``names`` present on ``href`` (case-insensitive), keyed by
+    the name as configured. Empty values count as absent."""
+    names = list(names)
+    if not href or not names:
+        return {}
+    try:
+        query = urlsplit(href.strip()).query
+    except ValueError:
+        return {}
+    present: dict[str, str] = {}
+    for k, v in parse_qsl(query, keep_blank_values=False):
+        k, v = _unescape_key(k).lower(), clean_tag(v)
+        if v and k not in present:
+            present[k] = v
+    return {n: present[n.lower()] for n in names if n.lower() in present}
 
 
 def captured_param(href: str | None, names: Iterable[str]) -> str | None:
@@ -91,19 +124,8 @@ def captured_param(href: str | None, names: Iterable[str]) -> str | None:
     Used to keep a campaign tag such as ``WT.mc_id`` on a link even though the
     param is stripped from the URL for node identity. Empty values count as absent.
     """
-    names = [n.lower() for n in names]
-    if not href or not names:
-        return None
-    try:
-        query = urlsplit(href.strip()).query
-    except ValueError:
-        return None
-    params = {k.lower(): v for k, v in parse_qs(query, keep_blank_values=False).items()}
-    for name in names:
-        values = [v.strip() for v in params.get(name, []) if v.strip()]
-        if values:
-            return values[0]
-    return None
+    found = captured_params(href, names)
+    return next((found[n] for n in names if n in found), None)
 
 
 def normalize_conversion_url(url: str | None) -> str | None:

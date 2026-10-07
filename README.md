@@ -429,6 +429,77 @@ or tracking cookie, e-mail, lead, visitor or contact ID, IP address), a
   Tags under `leads.min_cell` leads (default 5) are rolled into one
   "(other, <5 leads)" line. Full detail stays in the run folder's CSV.
 
+## Peer comparison (FedEx, DHL, Flexport, Maersk)
+
+Compares each peer with UPS using the same method and scope:
+- how far every page is from a win;
+- how deep content sits from the home page;
+- machine readability;
+- topic and service coverage.
+
+This is structure and content only. There is no traffic or lead data for the
+peers, so nothing in the output says how well a site converts.
+
+1. **Confirm before running.** Each peer's terms of use, and whether crawling
+   from a company network is allowed, are policy questions for Spence.
+2. **Freeze the topic taxonomy.** `configs/topics.yaml` is one rule set for
+   every site. Merge the explorer's UPS topic rules into it, bump `version`,
+   and don't tune it per site.
+3. **Crawl each site** with the same crawler and settings (pathcrawl
+   compare checks the settings fingerprint):
+
+   ```bash
+   pathcrawl crawl --config configs/peers/fedex.yaml    --campaign peer-compare --non-interactive
+   pathcrawl crawl --config configs/peers/dhl.yaml      --campaign peer-compare --non-interactive
+   pathcrawl crawl --config configs/peers/flexport.yaml --campaign peer-compare --non-interactive
+   pathcrawl crawl --config configs/peers/maersk.yaml   --campaign peer-compare --non-interactive
+   ```
+
+   Each run: robots.txt honoured (skips counted per host, including URLs
+   with a query string), one request per second, waits and retries on 403 or
+   429, and stops a host that keeps refusing (reported as blocked, not as a
+   finding). A 5,000-page safety cap; `report.json` says whether the crawl
+   was complete and how many URLs were still queued.
+4. **Report each run**, which writes `report.md` and `report.json`. At the
+   end of a crawl every linked win URL is checked without being loaded as a
+   page; off-domain destinations are recorded, not fetched.
+5. **Compare:**
+
+   ```bash
+   pathcrawl compare --sites configs/peers/compare.yaml --out compare \
+     --run UPS=runs/ups/<campaign>/<ts> --run FedEx=runs/fedex/peer-compare/<ts> \
+     --run DHL=runs/dhl/peer-compare/<ts> --run Flexport=runs/flexport/peer-compare/<ts> \
+     --run Maersk=runs/maersk/peer-compare/<ts>
+   ```
+
+   UPS is re-sliced to the peers' kind of scope with the `slice` regexes in
+   `compare.yaml`; check them against the UPS run's sections first.
+   Distances are computed on each site's whole graph, and the slice only
+   chooses which pages are counted.
+
+**Win classes** (`win.classes`, regex):
+- `talk_to_sales`, `quote_request` and `lead_onboarding` count as wins.
+- `self_serve` (instant rates, open account, booking) and `to_verify` are
+  reported separately and never counted as wins.
+- No talk-to-sales page was found for Flexport or Maersk. `compare.yaml`
+  states "none found" with the URLs checked.
+
+**Outputs** in `compare/`:
+- `distance_to_win.csv` and `depth_from_home.csv`: full distributions, all
+  links and body links.
+- `health.csv`: structured data, readable without JavaScript, unique title
+  and description, exactly one H1 with text, self-canonical.
+- `topic_matrix.csv`: pages, share of the site, and median clicks from home
+  and to a win, per topic and site.
+- `services.csv`: menu labels under services or solutions groups, plus
+  Service and Product entities, as each site presents them.
+- `summary.md`: the side-by-side table, win classes, robots.txt and site
+  files, topic questions, and a "what this cannot tell us" paragraph.
+- `summary.json`.
+
+Depth figures from an incomplete crawl are labelled "incomplete, depth
+understated". The comparison never reads lead tables or campaign tags.
+
 ## Test gates
 
 Each build step has to pass these before it merges. You can run all of them

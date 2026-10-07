@@ -35,7 +35,7 @@ from pathcrawl.dead import dead_annotations, dead_links, dead_pages, dead_sectio
 from pathcrawl.dead import write_csv as write_dead_csv
 from pathcrawl.health import health_annotations, health_section, page_health
 from pathcrawl.health import write_csv as write_health_csv
-from pathcrawl.leads import lead_annotations, lead_section
+from pathcrawl.leads import archetypes, lead_annotations, lead_section, write_zero_lead_csv, zero_lead_tags
 
 DEFINITIONS = {
     "click": "Following one link. A path of N clicks visits N+1 pages.",
@@ -372,6 +372,7 @@ def gexf_graph(g: nx.DiGraph, entries, categories, content_only: bool = False, s
             page_type=c.page_type if c else "",
             status=g.nodes[n].get("status") or "",
             win_type=g.nodes[n].get("win_type") or "",
+            conversion_class=g.nodes[n].get("conversion_class") or "",
             external=bool(g.nodes[n].get("external")),
             **(annotations.node(n) if annotations else {}),
             viz={
@@ -405,6 +406,31 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
     add("")
     add(f"> {headline(analysis, win_name)}")
     add("")
+    cov = crawl_coverage(run)
+    if cov["complete"]:
+        add(f"- Crawl complete: every in-scope URL found was visited.")
+    else:
+        add(f"- **Crawl incomplete** ({store.meta('status')}): {cov['queued_unvisited']} URLs were still queued when "
+            "it stopped, so depth figures understate how deep the site goes.")
+    for host, n in sorted(cov["robots_skipped_by_host"].items()):
+        q = cov["robots_skipped_with_query_by_host"].get(host, 0)
+        add(f"- {host}: {n} URL{'s' if n != 1 else ''} skipped because robots.txt disallows them"
+            + (f" ({q} of them carry a query string)" if q else "") + ".")
+    checks = cov["win_checks"]
+    if checks:
+        failed = [u for u, c in checks.items() if c.get("ok") is False]
+        detail = ", ".join(f"{u}: {checks[u]['check']}" for u in failed[:5])
+        add(f"- Win URLs linked from crawled pages: {len(checks)} checked without loading them as pages; "
+            f"{sum(1 for c in checks.values() if c.get('ok'))} answered, {len(failed)} did not"
+            + (f" ({detail})" if failed else "") + ".")
+    if cov["blocked_hosts"]:
+        add(f"- Blocked (kept refusing requests, so the crawl stopped there; not a finding about the site): "
+            f"{', '.join(cov['blocked_hosts'])}.")
+    merged = store.meta("merged_pages", []) or []
+    if merged:
+        add(f"- {sum(1 for g in merged if len(g) > 1)} pages were stored under more than one URL (differing only "
+            f"by tracking parameters) and merged; {sum(1 for g in merged if len(g) == 1)} renamed to their "
+            "clean URL (`pathcrawl backfill-links`).")
     def type_note(w) -> str:
         return f" ({w['win_type']})" if w.get("win_type") and w["win_type"] != win_name else ""
 
@@ -413,10 +439,18 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
             form = {True: "form found", False: "form not rendered", None: "form not checked"}[w["form_present"]]
             add(f"- Win page {w['url']}{type_note(w)}: loaded ({form}).")
         else:
-            add(f"- Win page {w['url']}{type_note(w)}: win page not fetched: {w['not_fetched_reason']}. "
+            add(f"- Win page {w['url']}{type_note(w)}: matched by address, not read (win page not fetched: "
+                f"{w['not_fetched_reason']}). "
                 f"It was matched by URL, "
                 f"so the link to it ({w['linked_from']} page{'s' if w['linked_from'] != 1 else ''} link here) "
                 "is confirmed, but the form itself was not checked.")
+    _, types = win_type_distances(run.graph)
+    if types:
+        add("")
+        add("Win pages by type (crawled pages linking straight to one): " + "; ".join(
+            f"{t}{'' if v['counts_as_win'] else ' (not counted as a win)'}: {v['win_pages']} "
+            f"page{'s' if v['win_pages'] != 1 else ''}, {v['pages_linking_directly']} linking"
+            for t, v in sorted(types.items())) + ".")
     misses = near_misses(run)
     if misses:
         add("")
@@ -553,6 +587,98 @@ def markdown_report(run, analysis: Analysis, summary: dict, mermaid: str, short,
         add(f"- **{term}**: {text}")
     add("")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- crawl coverage
+
+
+def settings_fingerprint(config) -> str:
+    """A short hash of the settings that must match across sites compared:
+    crawl limits and politeness, health checks and the normalization rules."""
+    import hashlib
+
+    crawl = config.crawl.model_dump(exclude={"headed", "slow_mo_ms", "screenshot"})
+    health = config.health.model_dump(exclude={"home_url"})
+    blob = json.dumps({"crawl": crawl, "health": health}, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+def crawl_coverage(run) -> dict:
+    """Is the crawl complete, what is still queued, and what robots.txt or a
+    refusing host kept out, per host."""
+    from pathcrawl import __version__
+
+    store = run.store
+    robots, robots_q = Counter(), Counter()
+    for r in store.db.execute("SELECT url FROM pages WHERE status = 'robots'"):
+        host = urlsplit(r["url"]).hostname or ""
+        robots[host] += 1
+        if urlsplit(r["url"]).query:
+            robots_q[host] += 1
+    queued = store.pending_count()
+    return {
+        "complete": store.meta("status") == "complete" and queued == 0,
+        "queued_unvisited": queued,
+        "robots_skipped_by_host": dict(robots),
+        "robots_skipped_with_query_by_host": dict(robots_q),
+        "blocked_hosts": store.meta("blocked_hosts", []) or [],
+        "win_checks": store.meta("win_checks", {}) or {},
+        "pathcrawl_version": __version__,
+        "settings_fingerprint": settings_fingerprint(run.config),
+    }
+
+
+# --------------------------------------------------------------------------- archetypes
+
+
+def archetype_section(summary: dict[str, dict]) -> list[str]:
+    L = ["## Audience archetypes", "",
+         "Read from the campaign tags on links (leads.archetype_pattern). A page carrying the tag is the page "
+         "the tag sits on; ads may use the same tag, so this is not where the visitor came from.", "",
+         "| archetype | tags | pages carrying it | of which link to a win page | leads (whole) |",
+         "|---|---|---|---|---|"]
+    for a, s in sorted(summary.items(), key=lambda kv: (-kv[1]["pages"], kv[0])):
+        L.append(f"| {a} | {s['tags']} | {s['pages']} | {s['pages_linking_to_win']} | {s['leads_whole']} |")
+    L.append("")
+    return L
+
+
+# --------------------------------------------------------------------------- win types
+
+
+def _slug(text: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "win"
+
+
+def win_type_distances(g) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Per node: clicks (all links) to the nearest win of any type
+    (``clicks_to_any_win``) and of each type (``clicks_to_<type>``, e.g.
+    ``clicks_to_virtual_consultation``); -1 = no path. Per type: win pages and
+    the crawled pages linking straight to one."""
+    h = mode_view(g, ALL_LINKS)
+    by_type: dict[str, list[str]] = {}
+    for n, d in g.nodes(data=True):
+        if d["win"]:
+            by_type.setdefault(d.get("win_type") or "win", []).append(n)
+        elif d.get("conversion_class"):  # not a win (e.g. self-serve), reported separately
+            by_type.setdefault(d["conversion_class"], []).append(n)
+    nodes: dict[str, dict] = {}
+    summary = {}
+    columns = [("clicks_to_any_win", None)] + [(f"clicks_to_{_slug(t)}", t) for t in sorted(by_type)]
+    for col, wtype in columns:
+        dist = distances_to_win(h, None if wtype is None else by_type[wtype])
+        for n, v in dist.items():
+            nodes.setdefault(n, {})[col] = v
+        if wtype is not None:
+            summary[wtype] = {
+                "counts_as_win": any(g.nodes[n]["win"] for n in by_type[wtype]),
+                "win_pages": len(by_type[wtype]),
+                "pages_linking_directly": sum(1 for n, v in dist.items() if v == 1 and g.nodes[n]["explored"]),
+                "column": col,
+            }
+    return nodes, summary
 
 
 # --------------------------------------------------------------------------- health
@@ -703,6 +829,7 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     out = Path(out_dir or run.dir)
     analysis = run.analyze()
     categories = categorize(run.store, run.graph, analysis, run.config.scope.locale_include)
+    run.store.set_categories(categories)
     summary = summarize(categories)
     short = make_short(list(run.graph))
     mermaid = mermaid_paths(analysis, short)
@@ -737,8 +864,13 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
             "pages_by_status": statuses,
             "max_depth": run.config.crawl.max_depth,
             "max_pages": run.config.crawl.max_pages,
+            **crawl_coverage(run),
         },
-        "entry_links": [dict(r) for r in store.entries()],
+        "entry_links": [{**dict(r), "requested_url": run.config.scope.normalize(r["requested_url"]) or r["requested_url"]}
+                        for r in store.entries()],
+        # counts only: the old URLs carried tracking params and stay in crawl.db
+        "merged_pages": {"merged": sum(1 for g in store.meta("merged_pages", []) or [] if len(g) > 1),
+                         "renamed": sum(1 for g in store.meta("merged_pages", []) or [] if len(g) == 1)},
         "headline": headline(analysis, run.config.win.name),
         "analysis": analysis.to_dict(),
         "categories": summary,
@@ -752,9 +884,13 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     annotations = Annotations()
     lead_nodes, lead_edges = lead_annotations(store, run.graph)
     if lead_nodes or store.meta("leads"):
-        annotations.add_nodes({"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0}, lead_nodes)
-        annotations.add_edges({"leads": 0.0}, {e: {"leads": v} for e, v in lead_edges.items()})
+        annotations.add_nodes({"leads_origin": 0, "leads_exact": 0, "leads_landed": 0, "leads_share": 0.0,
+                               "carries_lead_tag": False}, lead_nodes)
+        annotations.add_edges({"leads": 0}, {e: {"leads": v} for e, v in lead_edges.items()})
         extra += lead_section(store, run.graph, run.config.leads.min_cell, short)
+        zero_path = out / f"{run.config.client.slug}_zero_lead_tags.csv"
+        write_zero_lead_csv(zero_lead_tags(store, run.graph), zero_path)
+        paths[zero_path.name] = zero_path
         report["leads"] = {k: v for k, v in (store.meta("leads") or {}).items() if k not in ("tags", "conversion_pages")}
     dead_nodes, dead_edges = dead_annotations(store)
     annotations.add_nodes({"is_dead": False, "dead_reason": "", "inbound_dead_links": 0, "dead_inbound_pages": 0,
@@ -774,6 +910,13 @@ def write_report(run, out_dir: Path | None = None) -> dict[str, Path]:
     annotations.add_nodes({"has_structured_data": False, "js_dependent": False, "clicks_from_home_body_links": -1,
                            "clicks_from_home_all_links": -1}, health_annotations(health_rows))
     report["health"] = {"home_url": home, "summary": health_summary, "site_signals": site_signals}
+    type_nodes, report["win_types"] = win_type_distances(run.graph)
+    arch_nodes, arch_summary = archetypes(store, run.graph, run.config.leads.archetype_pattern)
+    if arch_summary:
+        annotations.add_nodes({"archetypes": ""}, arch_nodes)
+        report["archetypes"] = arch_summary
+        extra += archetype_section(arch_summary)
+    annotations.add_nodes({k: -1 for k in sorted({k for d in type_nodes.values() for k in d})}, type_nodes)
     if store.meta("external_seeds"):
         extra += external_seed_section(run, short)
         report["external_seeds"] = external_seed_rows(run)

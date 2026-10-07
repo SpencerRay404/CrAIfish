@@ -217,7 +217,10 @@ def test_leads_cli_and_report(tmp_path, lead_file):
     assert "5 tags in the lead file" in section
     assert "30 of 38 tagged leads (79%)" in section
     assert "Leads with a paid click ID: 9 (24%)" in section
-    assert "**3 pages carry allocated leads** (30 in total); 2 of them hold exact leads (20, 67%" in section
+    assert "**3 pages carry allocated leads** (30 in total); 2 of them hold exact leads (20 whole leads from a single " \
+           "carrier)" in section
+    assert "Pages add to **30 of 30 allocated**; the gap of 0 is the fractions lost to rounding down." in section
+    assert "- 0 pages carry a tag with a share under one lead and show 0" in section
     assert "| /retail | 12 | 12 | 0 |" in section
     assert "TAG_OLD (8 leads): links point at" in section
     assert "TAG_AD_ONLY (6)" in section
@@ -280,3 +283,115 @@ def test_lead_data_is_ignored_by_git():
 
     text = (Path(__file__).parent.parent / ".gitignore").read_text()
     assert "data/**/raw*" in text and "*MKT_TRK*" in text
+
+
+def test_tags_are_cleaned_and_untagged_leads_counted(tmp_path):
+    build_run(tmp_path)
+    lead_file = write_leads(tmp_path / "l.csv", [
+        (", TAG_SHARED", 10, 0, 0, ""),   # a leading comma used to stop the match
+        ("", 75, 0, 0, ""),              # untagged: counted, never joined
+        ("  ", 5, 0, 0, ""),
+    ])
+    tags = load_lead_tags([lead_file])
+    assert list(tags) == ["TAG_SHARED"] and tags.untagged == 80
+    s = Store(tmp_path / "crawl.db")
+    result = attribute(s, tags)
+    s.close()
+    assert {t.lead_tag: t.join for t in result.tags} == {"TAG_SHARED": "exact"}
+
+
+def test_link_tags_are_cleaned_at_capture():
+    from pathcrawl.normalize import captured_param
+
+    assert captured_param("https://x.test/t?WT.mc_id=,%20ONLINE_X_1", ["WT.mc_id"]) == "ONLINE_X_1"
+    assert captured_param("https://x.test/t?WT.mc_id=,", ["WT.mc_id"]) is None
+
+
+def test_lead_totals_and_zero_lead_tags_in_report(tmp_path, lead_file):
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = LEAD_ROWS + [("", 75, 0, 0, "")]
+    lf = write_leads(tmp_path / "with_untagged.csv", rows)
+    build_run(run, lf)
+    result = CliRunner().invoke(app, ["report", "--run", str(run)])
+    assert result.exit_code == 0, result.output
+    md = (run / "report.md").read_text()
+    assert "**They cover 30 of 38 tagged leads (79%).**" in md
+    assert "- Tagged leads (a tag in the lead file): 38" in md
+    assert "- Untagged leads (no tag, so they can't be joined to a link): 75" in md
+    assert "- All leads in the file: 113" in md
+    assert "**Tags that earned no leads:** 1 tags carried by crawled links have no leads in the lead file (1 of them " \
+           "on links to a win page); 1 pages carry a tagged link to a win page and earned no leads." in md
+    with open(run / "xco_zero_lead_tags.csv", newline="") as f:
+        zero = list(csv.DictReader(f))
+    assert zero == [{"tag": "TAG_NOLEADS", "pages_carrying": "1", "pages_linking_to_win": "1",
+                     "win_types": "consultation form"}]
+    data = json.loads((run / "report.json").read_text())
+    assert (data["leads"]["leads_untagged"], data["leads"]["leads_all"]) == (75, 113)
+
+
+def test_whole_number_leads(tmp_path):
+    """Fix 6: shares are kept at full precision; readers see whole leads, rounded down."""
+    import math
+
+    run = tmp_path / "run"
+    run.mkdir()
+    # TAG_SHARED: 7 leads over 2 pages = 3.5 each; TAG_OLD: 1 lead on one page;
+    # TAG_NOLEADS: 0.9 on one page (an aggregated file may hold fractions).
+    rows = [("TAG_SHARED", 7, 0, 0, ""), ("TAG_OLD", 1, 0, 0, ""), ("TAG_NOLEADS", 0.9, 0, 0, "")]
+    lf = write_leads(tmp_path / "l.csv", rows)
+    build_run(run, lf)
+    CliRunner().invoke(app, ["report", "--run", str(run)])
+    s = Store(run / "crawl.db")
+    shares = [r["share"] for r in s.lead_attribution()]
+    wholes = [r["leads_whole"] for r in s.lead_attribution()]
+    s.close()
+    assert math.fsum(shares) == 7 + 1 + 0.9  # full precision: sums exactly to the matched leads
+    assert sorted(wholes) == [0, 1, 3, 3] and all(isinstance(w, int) for w in wholes)
+    md = (run / "report.md").read_text()
+    # auto: 3.5 + 1 = 4.5 -> 4; whole: 3.5 -> 3; news: 0.9 -> 0
+    assert "Pages add to **7 of 8.9 allocated**; the gap of 1.9 is the fractions lost to rounding down." in md
+    assert "- 1 page carries a tag with a share under one lead and show 0" in md
+    data = json.loads((run / "report.json").read_text())
+    news = data["nodes"][B + "news"]
+    assert (news["leads_origin"], news["carries_lead_tag"], news["leads_share"]) == (0, True, 0.9)
+    assert data["nodes"][B + "auto"]["leads_origin"] == 4
+    assert all(isinstance(e["leads"], int) for e in data["edges"] if "leads" in e)
+    with open(run / "xco_lead_attribution.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert {r["leads_whole"] for r in rows} <= {"0", "1", "3"} and all("share" in r for r in rows)
+
+
+def test_audience_archetypes(tmp_path, lead_file):
+    from pathcrawl.config import ConfigError
+    from pathcrawl.leads import archetype_of
+
+    pattern = r"^TAG_(?P<archetype>[A-Z]+)"
+    assert archetype_of("TAG_SHARED", pattern) == "SHARED" and archetype_of("OTHER", pattern) is None
+    assert archetype_of("ONLINE_WEB_Store_Based_Retailers_MktgVirtualConsultationMainPage_1",
+                        r"^ONLINE_WEB_(?P<archetype>.+?)_MktgVirtualConsultationMainPage_\d+$") == "Store Based Retailers"
+    with pytest.raises(ConfigError, match="named group"):
+        parse_config({**make_config().model_dump(), "leads": {"archetype_pattern": "^TAG_(.*)"}})
+
+    run = tmp_path / "run"
+    run.mkdir()
+    build_run(run)
+    cfg = make_config(lead_file)
+    cfg.leads.archetype_pattern = pattern
+    live = tmp_path / "live.yaml"
+    live.write_text(yaml.safe_dump(cfg.model_dump()))
+    result = CliRunner().invoke(app, ["report", "--run", str(run), "--config", str(live)])
+    assert result.exit_code == 0, result.output
+    data = json.loads((run / "report.json").read_text())
+    assert data["archetypes"] == {
+        "NOLEADS": {"tags": 1, "pages": 1, "pages_linking_to_win": 1, "leads_whole": 0},
+        "OLD": {"tags": 1, "pages": 1, "pages_linking_to_win": 0, "leads_whole": 8},  # links to the 2023 page
+        "RETAIL": {"tags": 1, "pages": 1, "pages_linking_to_win": 1, "leads_whole": 12},
+        "SHARED": {"tags": 1, "pages": 2, "pages_linking_to_win": 2, "leads_whole": 10},
+    }
+    assert data["nodes"][B + "auto"]["archetypes"] == "OLD, SHARED"
+    assert data["nodes"][B + "support"]["archetypes"] == ""
+    md = (run / "report.md").read_text()
+    assert "## Audience archetypes" in md and "| SHARED | 1 | 2 | 2 | 10 |" in md
+    g = nx.read_gexf(run / "graph.gexf")
+    assert g.nodes[B + "retail"]["archetypes"] == "RETAIL"

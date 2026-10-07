@@ -23,12 +23,13 @@ rows, and report.md rolls tags under ``leads.min_cell`` into one line.
 from __future__ import annotations
 
 import csv
+import math
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from pathcrawl.normalize import normalize_conversion_url
+from pathcrawl.normalize import clean_tag, normalize_conversion_url
 
 REQUIRED_COLUMNS = ("wt_mc_id", "leads_most_recent_tag")
 OPTIONAL_COLUMNS = ("leads_source_initiative_tag", "paid_click_leads", "main_conversion_page")
@@ -75,9 +76,17 @@ def _number(value: str | None, where: str) -> float:
         raise LeadFileError(f"{where}: {value!r} is not a number") from None
 
 
-def load_lead_tags(paths: list[Path]) -> dict[str, TagLeads]:
-    """Aggregated lead counts per tag, summed over every file."""
-    out: dict[str, TagLeads] = {}
+class LeadTags(dict):
+    """Lead counts per tag (``dict[str, TagLeads]``), plus the leads in rows
+    with no tag (``untagged``), which can't be joined to any link."""
+
+    untagged: float = 0.0
+
+
+def load_lead_tags(paths: list[Path]) -> LeadTags:
+    """Aggregated lead counts per tag, summed over every file. Tags are cleaned
+    (whitespace and leading commas removed) before they are used."""
+    out = LeadTags()
     for path in paths:
         try:
             f = open(path, newline="", encoding="utf-8-sig")
@@ -103,10 +112,11 @@ def load_lead_tags(paths: list[Path]) -> dict[str, TagLeads]:
                     raise LeadFileError(f"{path} contains visitor tokens; use the aggregated tag file only")
                 if any(EMAIL_VALUE.match(v) for v in row.values()):
                     raise LeadFileError(f"{path} contains e-mail addresses; use the aggregated tag file only")
-                tag = row.get("wt_mc_id", "")
-                if not tag:
-                    continue
+                tag = clean_tag(row.get("wt_mc_id"))
                 where = f"{path.name} line {n}"
+                if not tag:
+                    out.untagged += _number(row.get("leads_most_recent_tag"), where)
+                    continue
                 t = out.setdefault(tag, TagLeads(tag))
                 leads = _number(row.get("leads_most_recent_tag"), where)
                 t.leads += leads
@@ -131,8 +141,16 @@ class Attribution:
     region: str  # comma-separated regions the tagged links sit in
     tag_leads_total: float
     tag_source_pages: int
-    leads_allocated: float
+    leads_allocated: float  # the share, at full precision (same as share; kept for older readers)
     attribution: str  # exact (one source page) or shared
+    share: float = 0.0  # this page's share of the tag's leads, full precision, for audit
+    leads_whole: int = 0  # floor(share): what is shown to readers (a lead is a whole record)
+    carries_tag: bool = True  # true even when leads_whole is 0
+
+    def __post_init__(self) -> None:
+        if not self.share and self.leads_allocated:
+            self.share = self.leads_allocated
+            self.leads_whole = math.floor(self.share + 1e-9)
 
 
 @dataclass
@@ -162,7 +180,10 @@ def tagged_links(store) -> dict[str, dict[str, dict[str, set[str]]]]:
     """mc_id -> src -> {"targets": {...}, "regions": {...}} for every tagged link."""
     out: dict[str, dict[str, dict[str, set[str]]]] = defaultdict(lambda: defaultdict(lambda: {"targets": set(), "regions": set()}))
     for r in store.db.execute("SELECT src, url, href, region, mc_id FROM links WHERE mc_id IS NOT NULL"):
-        entry = out[r["mc_id"]][r["src"]]
+        tag = clean_tag(r["mc_id"])
+        if not tag:
+            continue
+        entry = out[tag][r["src"]]
         target = store.resolve(r["url"]) if r["url"] else (r["href"] or "")
         if target:
             entry["targets"].add(target)
@@ -211,6 +232,8 @@ def attribute(store, lead_tags: dict[str, TagLeads], fallback: str | None = "str
                 tag_source_pages=n_src,
                 leads_allocated=t.leads / n_src,
                 attribution="exact" if n_src == 1 else "shared",
+                share=t.leads / n_src,
+                leads_whole=math.floor(t.leads / n_src),
             ))
     return LeadResult(rows, tags, lead_tags)
 
@@ -226,7 +249,9 @@ def save(store, result: LeadResult, files: list[str]) -> None:
         "lead_tags": len(result.lead_tags),
         "lead_tags_matched_exact": sum(1 for t in matched if t.join == "exact"),
         "lead_tags_matched_fallback": sum(1 for t in matched if t.join == "fallback"),
-        "leads_total": sum(t.leads for t in result.lead_tags.values()),
+        "leads_total": sum(t.leads for t in result.lead_tags.values()),  # tagged leads
+        "leads_untagged": getattr(result.lead_tags, "untagged", 0.0),
+        "leads_all": sum(t.leads for t in result.lead_tags.values()) + getattr(result.lead_tags, "untagged", 0.0),
         "leads_matched": sum(t.leads for t in matched),
         "paid_click_leads": sum(t.paid_click_leads for t in result.lead_tags.values()),
         # per-tag outcome without counts below the line: kept for the report
@@ -266,29 +291,50 @@ def run_leads(store, config, run_dir: Path) -> tuple[LeadResult, Path]:
 # --------------------------------------------------------------------------- graph annotations
 
 
-def lead_annotations(store, g) -> tuple[dict[str, dict], dict[tuple[str, str], float]]:
-    """Node attributes (leads_origin, leads_exact, leads_landed) and edge leads
-    from the stored attribution. Empty when ``pathcrawl leads`` has not run."""
-    nodes: dict[str, dict] = defaultdict(lambda: {"leads_origin": 0.0, "leads_exact": 0.0, "leads_landed": 0.0})
+def lead_annotations(store, g) -> tuple[dict[str, dict], dict[tuple[str, str], int]]:
+    """Node attributes and edge lead counts from the stored attribution, as
+    whole leads (rounded down; a lead is a whole record):
+
+    - ``leads_origin``: floor of the page's summed shares; ``leads_exact``: the
+      same for its exact (single-carrier) shares; ``leads_share``: the summed
+      shares at full precision, for audit; ``carries_lead_tag``: true for every
+      page with a share, even when its whole count is 0.
+    - ``leads_landed``: leads whose main conversion page is this page.
+    - Edge ``leads``: floor of the shares on that page-to-target link.
+
+    Empty when ``pathcrawl leads`` has not run.
+    """
+    share: dict[str, float] = defaultdict(float)
+    exact: dict[str, float] = defaultdict(float)
     edges: dict[tuple[str, str], float] = defaultdict(float)
-    rows = store.lead_attribution()
-    for r in rows:
-        n = nodes[r["src"]]
-        n["leads_origin"] += r["leads_allocated"]
+    for r in store.lead_attribution():
+        value = r["share"] if r["share"] is not None else r["leads_allocated"]
+        share[r["src"]] += value
         if r["attribution"] == "exact":
-            n["leads_exact"] += r["leads_allocated"]
-        targets = [t for t in (r["targets"] or "").split() if t]
-        in_graph = [t for t in targets if t in g]
+            exact[r["src"]] += value
+        in_graph = [t for t in (r["targets"] or "").split() if t in g]
         for t in in_graph:
-            edges[(r["src"], t)] += r["leads_allocated"] / len(in_graph)
+            edges[(r["src"], t)] += value / len(in_graph)
+    nodes: dict[str, dict] = {
+        n: {"leads_origin": _floor(v), "leads_exact": _floor(exact.get(n, 0.0)), "leads_share": round(v, 6),
+            "carries_lead_tag": True, "leads_landed": 0}
+        for n, v in share.items()
+    }
     meta = store.meta("leads", {}) or {}
     if meta:
         by_lower = {n.lower(): n for n in g}
         for page, leads in (meta.get("conversion_pages") or {}).items():
             node = by_lower.get(page.lower())
             if node:
-                nodes[node]["leads_landed"] += leads
-    return {k: {a: round(v, 3) for a, v in d.items()} for k, d in nodes.items()}, {k: round(v, 3) for k, v in edges.items()}
+                nodes.setdefault(node, {"leads_origin": 0, "leads_exact": 0, "leads_share": 0.0,
+                                        "carries_lead_tag": False, "leads_landed": 0})
+                nodes[node]["leads_landed"] += int(round(leads))
+    return nodes, {k: _floor(v) for k, v in edges.items()}
+
+
+def _floor(v: float) -> int:
+    """Round down, tolerating float noise (2.9999999 -> 3)."""
+    return math.floor(v + 1e-9)
 
 
 # --------------------------------------------------------------------------- report
@@ -317,33 +363,46 @@ def lead_section(store, g, min_cell: int, short) -> list[str]:
     L.append(
         f"{meta.get('lead_tags', 0)} tags in the lead file ({', '.join(Path(f).name for f in meta.get('files', []))}); "
         f"{meta.get('lead_tags_matched_exact', 0)} match a crawled link tag exactly and "
-        f"{meta.get('lead_tags_matched_fallback', 0)} after dropping a numeric suffix. They cover "
-        f"{_n(matched)} of {_n(total)} tagged leads ({round(100 * matched / total) if total else 0}%). "
+        f"{meta.get('lead_tags_matched_fallback', 0)} after dropping a numeric suffix. **They cover "
+        f"{_n(matched)} of {_n(total)} tagged leads ({round(100 * matched / total) if total else 0}%).** "
         "Each tag's leads are split evenly over the pages carrying it: exact when one page carries the tag, "
         f"shared otherwise. Leads with a paid click ID: {_n(meta.get('paid_click_leads', 0))} "
         f"({round(100 * meta.get('paid_click_leads', 0) / total) if total else 0}%). Tags with fewer than "
         f"{min_cell} leads are rolled up in this report; full detail is in the run folder's lead_attribution CSV."
     )
     L.append("")
+    L.append(f"- Tagged leads (a tag in the lead file): {_n(total)}")
+    L.append(f"- Untagged leads (no tag, so they can't be joined to a link): {_n(meta.get('leads_untagged', 0))}")
+    L.append(f"- All leads in the file: {_n(meta.get('leads_all', total))}")
+    L.append("")
 
     origin: dict[str, dict[str, float]] = defaultdict(lambda: {"all": 0.0, "exact": 0.0})
     for r in rows:
-        origin[r["src"]]["all"] += r["leads_allocated"]
+        value = r["share"] if r["share"] is not None else r["leads_allocated"]
+        origin[r["src"]]["all"] += value
         if r["attribution"] == "exact":
-            origin[r["src"]]["exact"] += r["leads_allocated"]
+            origin[r["src"]]["exact"] += value
     exact_pages = sum(1 for v in origin.values() if v["exact"])
     exact_total = sum(v["exact"] for v in origin.values())
-    allocated = sum(v["all"] for v in origin.values())
-    L.append(f"**{len(origin)} pages carry allocated leads** ({_n(round(allocated, 1))} in total); "
-             f"{exact_pages} of them hold exact leads ({_n(round(exact_total, 1))}, "
-             f"{round(100 * exact_total / allocated) if allocated else 0}% of the allocated total).")
+    allocated = math.fsum(v["all"] for v in origin.values())
+    whole = {src: _floor(v["all"]) for src, v in origin.items()}
+    whole_total = sum(whole.values())
+    under_one = sum(1 for src in origin if whole[src] == 0)
+    L.append(f"**{len(origin)} pages carry allocated leads** ({_n(round(allocated, 6))} in total); "
+             f"{exact_pages} of them hold exact leads ({_n(_floor(exact_total))} whole leads from a single carrier), "
+             f"the rest share a tag with other pages.")
+    L.append("")
+    L.append(f"- Leads are shown as whole numbers, rounded down per page (a lead is a whole record). Pages add to "
+             f"**{whole_total} of {_n(round(allocated, 6))} allocated**; the gap of "
+             f"{_n(round(allocated - whole_total, 6))} is the fractions lost to rounding down.")
+    L.append(f"- {under_one} page{'s carry' if under_one != 1 else ' carries'} a tag with a share under one lead and show 0; "
+             "they still count as pages where a lead was allocated.")
     L.append("")
     if origin:
-        L.append("| page carrying the tag | leads allocated | exact | shared |")
+        L.append("| page carrying the tag | leads (whole) | exact | shared |")
         L.append("|---|---|---|---|")
         for src, v in sorted(origin.items(), key=lambda kv: (-kv[1]["all"], kv[0]))[:15]:
-            L.append(f"| {short(src)} | {_n(round(v['all'], 1))} | {_n(round(v['exact'], 1))} | "
-                     f"{_n(round(v['all'] - v['exact'], 1))} |")
+            L.append(f"| {short(src)} | {whole[src]} | {_floor(v['exact'])} | {_floor(v['all'] - v['exact'])} |")
         L.append("")
 
     off_target = [t for t in tags if t.join and t.lands_on_target is False]
@@ -386,4 +445,108 @@ def lead_section(store, g, min_cell: int, short) -> list[str]:
                  + f" Tags on those links: {len(win_tags)}; with leads: {len(win_tags & with_leads)}, without leads "
                  f"in the lead file: {len(win_tags - with_leads)}.")
     L.append("")
+    zero = zero_lead_tags(store, g)
+    unrewarded = pages_with_unrewarded_win_tags(store, g)
+    L.append(f"**Tags that earned no leads:** {len(zero)} tags carried by crawled links have no leads in the lead "
+             f"file ({sum(1 for z in zero if z.pages_linking_to_win)} of them on links to a win page); "
+             f"{len(unrewarded)} pages carry a tagged link to a win page and earned no leads. "
+             "List: the zero_lead_tags CSV.")
+    L.append("")
     return L
+
+
+# --------------------------------------------------------------------------- zero-lead tags
+
+
+@dataclass
+class ZeroLeadTag:
+    tag: str
+    pages_carrying: int
+    pages_linking_to_win: int  # pages where the tag is on a link to a win page
+    win_types: str
+
+
+def zero_lead_tags(store, g) -> list[ZeroLeadTag]:
+    """Tags carried by crawled links that earned no leads in the lead file."""
+    meta = store.meta("leads", {}) or {}
+    with_leads = {lt for t in meta.get("tags", []) if t.get("join") and t.get("leads", 0) > 0
+                  for lt in t.get("link_tags", [])}
+    carriers: dict[str, set[str]] = defaultdict(set)
+    to_win: dict[str, set[str]] = defaultdict(set)
+    types: dict[str, set[str]] = defaultdict(set)
+    for r in store.db.execute("SELECT src, url, mc_id FROM links WHERE mc_id IS NOT NULL"):
+        tag = clean_tag(r["mc_id"])
+        if not tag or tag in with_leads:
+            continue
+        carriers[tag].add(r["src"])
+        target = store.resolve(r["url"]) if r["url"] else None
+        if target in g and g.nodes[target]["win"]:
+            to_win[tag].add(r["src"])
+            types[tag].add(g.nodes[target].get("win_type") or "win")
+    return sorted((ZeroLeadTag(t, len(carriers[t]), len(to_win[t]), ", ".join(sorted(types[t])))
+                   for t in carriers), key=lambda z: (-z.pages_linking_to_win, -z.pages_carrying, z.tag))
+
+
+def pages_with_unrewarded_win_tags(store, g) -> list[str]:
+    """Pages carrying a tagged link to a win page that earned no allocated leads."""
+    earning = {r["src"] for r in store.lead_attribution()}
+    pages = set()
+    for r in store.db.execute("SELECT src, url FROM links WHERE mc_id IS NOT NULL AND url IS NOT NULL"):
+        target = store.resolve(r["url"])
+        if target in g and g.nodes[target]["win"] and r["src"] not in earning:
+            pages.add(r["src"])
+    return sorted(pages)
+
+
+def write_zero_lead_csv(rows: list[ZeroLeadTag], path: Path) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(ZeroLeadTag.__dataclass_fields__))
+        w.writeheader()
+        for r in rows:
+            w.writerow(asdict(r))
+
+
+# --------------------------------------------------------------------------- audience archetypes
+
+
+def archetype_of(tag: str, pattern: str | None) -> str | None:
+    """The audience archetype a campaign tag names (``leads.archetype_pattern``)."""
+    if not pattern or not tag:
+        return None
+    m = re.match(pattern, tag)
+    if not m or not m.group("archetype"):
+        return None
+    return m.group("archetype").replace("_", " ").strip()
+
+
+def archetypes(store, g, pattern: str | None) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Per page: the archetypes of the tags its links carry. Per archetype: tags,
+    pages carrying it, pages where it sits on a link to a win page, and whole
+    leads (rounded down, from the stored attribution)."""
+    if not pattern:
+        return {}, {}
+    page_arch: dict[str, set[str]] = defaultdict(set)
+    summary: dict[str, dict] = {}
+    for r in store.db.execute("SELECT src, url, mc_id FROM links WHERE mc_id IS NOT NULL"):
+        a = archetype_of(clean_tag(r["mc_id"]), pattern)
+        if not a:
+            continue
+        page_arch[r["src"]].add(a)
+        s = summary.setdefault(a, {"tags": set(), "pages": set(), "pages_linking_to_win": set(), "leads_share": 0.0})
+        s["tags"].add(clean_tag(r["mc_id"]))
+        s["pages"].add(r["src"])
+        target = store.resolve(r["url"]) if r["url"] else None
+        if target in g and g.nodes[target]["win"]:
+            s["pages_linking_to_win"].add(r["src"])
+    for r in store.lead_attribution():
+        for tag in (r["mc_id"] or "").split(", "):
+            a = archetype_of(tag, pattern)
+            if a and a in summary:
+                value = r["share"] if r["share"] is not None else r["leads_allocated"]
+                summary[a]["leads_share"] += value / max(1, len((r["mc_id"] or "").split(", ")))
+    nodes = {n: {"archetypes": ", ".join(sorted(v))} for n, v in page_arch.items()}
+    out = {a: {"tags": len(s["tags"]), "pages": len(s["pages"]),
+               "pages_linking_to_win": len(s["pages_linking_to_win"]),
+               "leads_whole": _floor(s["leads_share"])}
+           for a, s in sorted(summary.items())}
+    return nodes, out

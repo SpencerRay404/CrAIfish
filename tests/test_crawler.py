@@ -364,9 +364,92 @@ def test_health_signals_are_recorded(make_site, tmp_path):
     c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
     row = page_row(c, site.base + "/start.html")
     assert (row["og_properties"], row["microdata_types"], row["robots_meta"]) == ('["og:title"]', '["Product"]', "index")
+    assert c.store.page_tags()[site.base + "/start.html"]["schema_types"] == ["Product"]  # page tags at crawl time
     signals = c.store.meta("site_signals")
     h = signals[site.base.split("//")[1]]
     assert h["robots_txt"] and h["llms_txt"] and h["ai_crawlers"]["GPTBot"]["allowed_home"] is False
+
+
+def test_refusing_host_is_backed_off_then_stopped(make_site, tmp_path, monkeypatch):
+    import pathcrawl.crawler as crawler_mod
+
+    sleeps = []
+    monkeypatch.setattr(crawler_mod.time, "sleep", lambda s: sleeps.append(s))
+    site = make_site({
+        "/start.html": (200, {}, html("".join(f'<a href="/p{i}.html">p</a>' for i in range(4)))),
+        **{f"/p{i}.html": (429, {}, html("Too many requests")) for i in range(4)},
+    })
+    cfg = config_for(site, ["/start.html"], backoff_s=5, backoff_retries=1, host_block_limit=2)
+    c, status = crawl(cfg, tmp_path)
+    assert status == "complete"
+    assert sleeps.count(5) == 2  # one wait each for the two pages fetched before the host was stopped
+    statuses = {r["url"].rsplit("/", 1)[1]: r["status"] for r in c.store.pages()}
+    assert statuses == {"start.html": "ok", "p0.html": "skipped", "p1.html": "host_blocked",
+                        "p2.html": "host_blocked", "p3.html": "host_blocked"}
+    assert site.requests.count("/p2.html") == 0  # never fetched once the host was stopped
+    assert c.store.meta("blocked_hosts") == [site.base.split("//")[1]]
+
+
+def test_dropped_connections_count_as_refusals(make_site, tmp_path, monkeypatch):
+    """A bot wall that drops the connection (ERR_HTTP2_PROTOCOL_ERROR on dhl.com)
+    is backed off and stops the host, like a 403/429."""
+    import pathcrawl.crawler as crawler_mod
+
+    sleeps = []
+    monkeypatch.setattr(crawler_mod.time, "sleep", lambda s: sleeps.append(s))
+    site = make_site({
+        "/start.html": (200, {}, html("".join(f'<a href="/p{i}.html">p</a>' for i in range(4)))),
+        **{f"/p{i}.html": (200, {}, html("fine")) for i in range(4)},
+    })
+    real = Crawler._visit_with_reset
+    attempts = []
+
+    def visit(self, url):
+        if "/p" in url:
+            attempts.append(url)
+            raise RuntimeError(f"Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at {url}")
+        return real(self, url)
+
+    monkeypatch.setattr(Crawler, "_visit_with_reset", visit)
+    cfg = config_for(site, ["/start.html"], backoff_s=5, backoff_retries=1, host_block_limit=2)
+    c, status = crawl(cfg, tmp_path)
+    assert status == "complete"
+    assert sleeps.count(5) == 2 and len(attempts) == 4  # two pages, each tried twice, then the host stops
+    statuses = {r["url"].rsplit("/", 1)[1]: r["status"] for r in c.store.pages()}
+    assert statuses == {"start.html": "ok", "p0.html": "skipped", "p1.html": "host_blocked",
+                        "p2.html": "host_blocked", "p3.html": "host_blocked"}
+    assert c.store.meta("blocked_hosts") == [site.base.split("//")[1]]
+
+
+def test_linked_win_urls_are_checked_not_loaded(make_site, tmp_path):
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: *\nDisallow: /blocked-win.html\n"),
+        "/start.html": (200, {}, html('<a href="/win.html">a</a><a href="/blocked-win.html">b</a>'
+                                      '<a href="https://forms.elsewhere.test/book">c</a>')),
+        "/win.html": WIN,
+    })
+    cfg = config_for(site, ["/start.html"])
+    cfg.win.url_patterns = [site.base + "/win.html", site.base + "/blocked-win.html", "https://forms.elsewhere.test/*"]
+    c, _ = crawl(cfg, tmp_path)
+    checks = c.store.meta("win_checks")
+    assert checks[site.base + "/win.html"]["check"] == "HTTP 200" and checks[site.base + "/win.html"]["ok"]
+    assert checks[site.base + "/blocked-win.html"]["check"] == "not checked: robots.txt disallows it"
+    assert checks["https://forms.elsewhere.test/book"]["check"].startswith("destination only")
+    assert page_row(c, site.base + "/win.html")["status"] == "not_fetched"  # checked, never loaded as a page
+
+
+def test_wildcard_robots_rules_are_honoured(make_site, tmp_path):
+    """A FedEx-style file: "Allow: /" first, then "Disallow: /*?*". Every URL
+    with a query string must be skipped and counted, not crawled."""
+    site = make_site({
+        "/robots.txt": (200, {"Content-Type": "text/plain"}, "User-agent: *\nAllow: /\nDisallow: /*?*\n"),
+        "/start.html": (200, {}, html('<a href="/a.html?ref=nav">a</a><a href="/b.html">b</a>')),
+        "/b.html": (200, {}, html("<p>b</p>")),
+    })
+    c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
+    assert page_row(c, site.base + "/a.html?ref=nav")["status"] == "robots"
+    assert page_row(c, site.base + "/b.html")["status"] == "ok"
+    assert not any(r.startswith("/a.html") for r in site.requests)
 
 
 def test_max_depth_limits_how_far_the_crawl_goes(make_site, tmp_path):
@@ -422,7 +505,8 @@ def test_win_is_terminal_and_not_loaded(make_site, tmp_path):
         "/thanks.html": (200, {}, html(NAV)),
     })
     c, _ = crawl(config_for(site, ["/start.html"]), tmp_path)
-    assert "/win.html" not in site.requests  # matched by URL: nothing to load
+    # matched by URL: never loaded as a page; one status check at the end of the crawl
+    assert site.requests.count("/win.html") == 1 and c.store.meta("win_checks")[site.base + "/win.html"]["ok"]
     win = page_row(c, site.base + "/win.html")
     assert win["status"] == "not_fetched" and win["win"] == 1 and win["win_source"] == "pattern"
     assert not c.store.has_page(site.base + "/thanks.html")
@@ -485,6 +569,22 @@ def test_consent_banner_is_dismissed(make_site, tmp_path):
     banner = (
         '<div id="onetrust-banner-sdk">We use cookies '
         "<button id=\"onetrust-accept-btn-handler\" onclick=\"this.parentNode.style.display='none'\">OK</button></div>"
+    )
+    site = make_site({"/start.html": (200, {}, html(NAV + banner)), "/win.html": WIN})
+    op = ScriptedOperator([])
+    crawl(config_for(site, ["/start.html"]), tmp_path, op)
+    assert [p.kind for p in op.problems] == []
+
+
+def test_slow_consent_banner_is_dismissed(make_site, tmp_path):
+    """The button appears late and the banner fades out slowly after the click
+    (OneTrust on ups.com); neither counts as a stuck banner."""
+    banner = (
+        '<div id="onetrust-banner-sdk">We use cookies</div><script>'
+        "setTimeout(() => { const b = document.createElement('button'); b.id = 'onetrust-reject-all-handler';"
+        " b.textContent = 'Reject'; b.onclick = () => setTimeout(() =>"
+        " { document.getElementById('onetrust-banner-sdk').style.display = 'none'; b.remove(); }, 1200);"
+        " document.getElementById('onetrust-banner-sdk').appendChild(b); }, 600);</script>"
     )
     site = make_site({"/start.html": (200, {}, html(NAV + banner)), "/win.html": WIN})
     op = ScriptedOperator([])

@@ -1,0 +1,58 @@
+# Peer comparison: FedEx. Public pages only: no login, no form submits,
+# robots.txt honoured. Crawl with:
+#   pathcrawl crawl --config configs/peers/fedex.yaml --campaign peer-compare --non-interactive
+# robots.txt has 'Disallow: /*?*' (all URLs with a query string, with exceptions). Links that carry query
+# strings are skipped; the report counts them per host (a finding in itself).
+#
+# Win URLs came from planning searches and were not all opened as pages. At
+# the end of the crawl each linked win URL is checked (report: "Win URLs");
+# anything that fails is reported, not dropped. Verify the start URL at run time.
+
+client:
+  name: "FedEx"
+  slug: "fedex"
+
+scope:
+  allowed_domains: ["www.fedex.com"]
+  include_patterns: ["^https://www\\.fedex\\.com/en-us/"]
+  strip_query_params: ["msockid", "_gl", "gclid", "gbraid", "wbraid", "gad_source", "gad_campaignid", "gclsrc", "mkt_tok", "fbclid", "utm_*", "campaign_id", "WT.*"]
+  capture_params: []
+
+win:
+  name: "any win"
+  classes:
+    - name: talk_to_sales
+      patterns:
+        - "^https://www\\.fedex\\.com/en-us/small-business/sales-support\\.html"
+        - "^https://www\\.fedex\\.com/(en-us|content/fedex-com/sites/us/en_us)/small-business/account-help-sales-consult\\.html"
+        - "^https://isell\\.my\\.site\\.com/s/schedule"   # off-domain: recorded as the destination, not fetched
+    - name: self_serve
+      any_win: false
+      patterns:
+        - "^https://www\\.fedex\\.com/en-us/open-account/"
+
+campaigns:
+  - id: "peer-compare"
+    name: "FedEx peer comparison"
+    platform: "site"
+    ad_copy: "No ad: a structure and content crawl from the locale home page."
+    entry_links:
+      - label: "FedEx home"
+        url: "https://www.fedex.com/en-us/home.html"
+
+health:
+  home_url: "https://www.fedex.com/en-us/home.html"
+
+crawl:
+  # Same settings for every site in the comparison (UPS included).
+  max_depth: 50          # depth is measured, not capped; the page budget is the safety stop
+  max_pages: 5000
+  delay_ms: 1000         # one request per second at most
+  backoff_s: 30          # on 403/429: wait 30 s, then 60 s, before giving up on a page
+  backoff_retries: 2
+  host_block_limit: 5    # 5 refused pages in a row: stop the host, report it as blocked
+  headed: true
+  slow_mo_ms: 0
+  respect_robots: true
+  page_timeout_ms: 30000
+  screenshot: false

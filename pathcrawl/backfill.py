@@ -17,7 +17,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from pathcrawl.normalize import captured_param
+import json
+
+from pathcrawl.extract import h1_counts
+from pathcrawl.normalize import captured_params
 
 
 @dataclass
@@ -29,6 +32,7 @@ class LinkBackfill:
     duplicate_pages: list[list[str]] = field(default_factory=list)  # merged groups
     links_renormalized: int = 0
     dead_pages: int = 0
+    page_tags: int = 0
 
 
 def backfill_links(store, scope) -> LinkBackfill:
@@ -36,10 +40,26 @@ def backfill_links(store, scope) -> LinkBackfill:
     out = LinkBackfill()
     out.duplicate_pages = duplicate_pages(store, scope)
     out.links_renormalized = merge_duplicate_pages(store, scope, out.duplicate_pages)
+    if out.duplicate_pages:
+        previous = store.meta("merged_pages", []) or []
+        store.set_meta(merged_pages=previous + out.duplicate_pages)
     rows = store.db.execute("SELECT id, href FROM links").fetchall()
-    updates = [(captured_param(r["href"], scope.capture_params), r["id"]) for r in rows]
+    first = scope.capture_params[0] if scope.capture_params else ""
+    updates = []
+    for r in rows:
+        found = captured_params(r["href"], scope.capture_params)
+        updates.append((found.get(first), json.dumps(found) if found else None, r["id"]))
     with store.db:
-        store.db.executemany("UPDATE links SET mc_id = ? WHERE id = ?", updates)
+        store.db.executemany("UPDATE links SET mc_id = ?, params = ? WHERE id = ?", updates)
+        # H1s with and without text
+        for r in store.db.execute("SELECT url, headings FROM pages WHERE headings IS NOT NULL").fetchall():
+            store.db.execute("UPDATE pages SET h1_count = ?, h1_empty_count = ? WHERE url = ?",
+                             (*h1_counts(json.loads(r["headings"])), r["url"]))
+        # canonical URLs are stored normalized, like every other URL
+        for r in store.db.execute("SELECT url, canonical FROM pages WHERE canonical IS NOT NULL").fetchall():
+            new = scope.normalize(r["canonical"])
+            if new and new != r["canonical"]:
+                store.db.execute("UPDATE pages SET canonical = ? WHERE url = ?", (new, r["url"]))
     out.links = len(rows)
     stats = store.db.execute(
         "SELECT COUNT(*), COUNT(DISTINCT mc_id), COUNT(DISTINCT src) FROM links WHERE mc_id IS NOT NULL"
@@ -48,7 +68,44 @@ def backfill_links(store, scope) -> LinkBackfill:
     from pathcrawl.dead import backfill_dead
 
     out.dead_pages = backfill_dead(store)
+    out.page_tags = backfill_page_tags(store)
     return out
+
+
+def backfill_page_tags(store) -> int:
+    """page_tags rows for loaded pages crawled before page tags were recorded,
+    rebuilt from what crawl.db holds: title, description, H1, path, structured
+    data types and the page's own menu link labels (their group labels, the
+    breadcrumb, Open Graph and keyword tags weren't stored, so they stay
+    empty). Marked source = backfill."""
+    from urllib.parse import urlsplit
+
+    have = {r[0] for r in store.db.execute("SELECT url FROM page_tags")}
+    rows = store.db.execute(
+        """SELECT url, title, meta_description, headings, jsonld_types, microdata_types, rdfa_types
+           FROM pages WHERE status IN ('ok', 'http_error')""").fetchall()
+    n = 0
+    with store.db:
+        for r in rows:
+            if r["url"] in have:
+                continue
+            headings = json.loads(r["headings"]) if r["headings"] else []
+            types = set()
+            for col in ("jsonld_types", "microdata_types", "rdfa_types"):
+                types |= set(json.loads(r[col]) if r[col] else [])
+            labels = []
+            for lk in store.db.execute(
+                    "SELECT DISTINCT text FROM links WHERE src = ? AND region IN ('nav', 'header', 'footer') "
+                    "AND text != '' ORDER BY id", (r["url"],)):
+                labels.append(["", lk["text"]])
+            store.save_page_tags(r["url"], "backfill", r["title"], r["meta_description"], {
+                "h1": next((t for level, t in headings if level == 1 and t.strip()), ""),
+                "url_path_segments": [s for s in urlsplit(r["url"]).path.split("/") if s],
+                "breadcrumb": [], "schema_types": sorted(types), "og_type": None, "article_tags": [],
+                "meta_keywords": [], "service_entities": [], "nav_labels": labels[:300],
+            })
+            n += 1
+    return n
 
 
 def duplicate_pages(store, scope) -> list[list[str]]:

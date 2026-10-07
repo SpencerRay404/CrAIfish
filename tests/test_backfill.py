@@ -122,9 +122,11 @@ def test_ups_config_captures_mc_id_and_strips_source_params():
     from pathcrawl.config import load_config
 
     c = load_config(Path(__file__).parent.parent / "configs" / "ups.yaml")
-    assert c.scope.capture_params == ["WT.mc_id"]
+    assert c.scope.capture_params == ["WT.mc_id", "campaign_id"]
     base = "https://www.ups.com/us/en/customized-shipping-logistic-services/retail-store-shipping-logistic-solutions"
-    for param in ("msockid=abc", "_gl=1*x", "gbraid=g", "wbraid=w", "WT.mc_id=T"):
+    for param in ("msockid=abc", "_gl=1*x", "gbraid=g", "wbraid=w", "WT.mc_id=T", "campaign_id=123", "gclid=g",
+                  "gad_source=1", "gad_campaignid=2", "gclsrc=aw.ds", "amp;gclsrc=aw.ds", "mkt_tok=t", "fbclid=f",
+                  "utm_source=li"):
         assert c.scope.normalize(f"{base}?{param}") == base
 
 
@@ -154,4 +156,76 @@ def test_duplicate_pages_are_merged(tmp_path):
     assert [e["node_url"] for e in s.entries()] == [clean]
     assert s.resolve(dup) == clean
     assert not s.has_page(dup)
+    s.close()
+
+
+def test_amp_escaped_params_are_recognised():
+    from pathcrawl.normalize import captured_params, normalize_url
+
+    url = "https://x.test/p?a=1&amp;gclsrc=aw.ds&amp;campaign_id=9"
+    assert normalize_url(url, strip_params=["gclsrc", "campaign_id"]) == "https://x.test/p?a=1"
+    assert captured_params(url, ["campaign_id", "WT.mc_id"]) == {"campaign_id": "9"}
+
+
+def test_all_captured_params_are_kept_and_mc_id_is_the_first(tmp_path):
+    from pathcrawl.store import LinkRecord, PageRecord
+
+    c = config(capture_params=["WT.mc_id", "campaign_id"], strip_query_params=["WT.*", "campaign_id"])
+    html = '<main><a href="/talk?WT.mc_id=T1&campaign_id=55">a</a><a href="/talk?campaign_id=66">b</a></main>'
+    a, b = extract_links(html, B + "s", c.scope.strip_query_params, capture_params=c.scope.capture_params)
+    assert (a.url, a.mc_id, a.params) == (B + "talk", "T1", {"WT.mc_id": "T1", "campaign_id": "55"})
+    assert (b.mc_id, b.params) == (None, {"campaign_id": "66"})  # campaign_id is never the lead-join tag
+
+    s = Store(tmp_path / "crawl.db")
+    s.save_page(PageRecord(url=B + "s", status="ok", canonical=B + "s?campaign_id=55"),
+                [LinkRecord("/talk?campaign_id=66", B + "talk", "b", "body", True)])
+    s.save_page(PageRecord(url=B + "s?campaign_id=55", status="ok"), [])
+    out = backfill_links(s, c.scope)
+    assert out.duplicate_pages == [[B + "s", B + "s?campaign_id=55"]]
+    row = s.db.execute("SELECT mc_id, params FROM links").fetchone()
+    assert row["mc_id"] is None and row["params"] == '{"campaign_id": "66"}'
+    assert s.db.execute("SELECT canonical FROM pages").fetchone()[0] == B + "s"
+    assert s.meta("merged_pages") == [[B + "s", B + "s?campaign_id=55"]]
+    s.close()
+
+
+TRACKING = ("msockid", "gclid", "mkt_tok", "fbclid", "campaign_id", "gclsrc", "utm_")
+
+
+def test_no_tracking_params_in_outputs_outside_links_href(tmp_path):
+    """Fix 2 acceptance: after backfill, no output file carries a tracking param."""
+    import glob
+
+    from pathcrawl.report import write_report
+    from pathcrawl.run import open_run
+    from pathcrawl.store import LinkRecord, PageRecord
+
+    c = config(strip_query_params=["WT.*", "msockid", "gclid", "mkt_tok", "fbclid", "campaign_id", "gclsrc", "utm_*"],
+               capture_params=["WT.mc_id", "campaign_id"])
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(c.model_dump()))
+    s = Store(tmp_path / "crawl.db")
+    s.set_meta(status="complete", campaign_id="c")
+    s.add_entry(0, "a", B + "a?utm_source=li&gclid=1", B + "a?gclid=1")
+    s.save_page(PageRecord(url=B + "a?gclid=1", status="ok", title="A", canonical=B + "a?msockid=1", jsonld_types=[]), [
+        LinkRecord("/b?msockid=9&amp;gclsrc=aw.ds", B + "b?gclsrc=aw.ds&msockid=9", "b", "body", True),
+        LinkRecord("/talk?WT.mc_id=T&campaign_id=4", B + "talk", "t", "body", True),
+    ])
+    s.save_page(PageRecord(url=B + "b?mkt_tok=x", status="ok", title="B", jsonld_types=[]),
+                [LinkRecord("/a?fbclid=z", B + "a?fbclid=z", "a", "nav", True)])
+    s.save_page(PageRecord(url=B + "b", status="ok", title="B", jsonld_types=[]), [])
+    backfill_links(s, c.scope)
+    s.close()
+    run = open_run(tmp_path)
+    write_report(run)
+    run.close()
+    leaks = []
+    for f in glob.glob(str(tmp_path / "*")):
+        if f.endswith((".db", ".yaml")):
+            continue
+        text = open(f, encoding="utf-8", errors="replace").read()
+        leaks += [(f, t) for t in TRACKING if t in text]
+    assert leaks == []
+    s = Store(tmp_path / "crawl.db")
+    assert sorted(r["url"] for r in s.db.execute("SELECT url FROM pages")) == [B + "a", B + "b"]
+    assert all(t not in (r["url"] or "") for r in s.db.execute("SELECT url FROM links") for t in TRACKING)
     s.close()

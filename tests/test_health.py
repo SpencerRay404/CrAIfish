@@ -160,7 +160,7 @@ def test_lead_bearing_pages_get_their_own_row(tmp_path):
     CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
     md = (tmp_path / "report.md").read_text()
     assert "| **pages carrying leads** | 1 | 0 | 1 (100%) | 0 (0%) | 0 |" in md
-    assert health_rows(tmp_path)[HOME]["leads_allocated"] == "7.0"
+    assert health_rows(tmp_path)[HOME]["leads_allocated"] == "7"  # whole leads
 
 
 def test_old_runs_say_the_new_signals_were_not_recorded(tmp_path):
@@ -258,8 +258,9 @@ def test_site_signals_cli_against_a_local_server(tmp_path):
         s.close()
         result = CliRunner().invoke(app, ["site-signals", "--run", str(tmp_path)])
         assert result.exit_code == 0, result.output
-        assert "AI crawlers blocked from home: 1 (GPTBot), llms.txt yes" in result.output
-        assert "sitemap.xml: HTTP 404" in result.output  # why the sitemap count is 0
+        assert "robots.txt read; AI crawlers named/blocked 1 / 1 (blocked: GPTBot); llms.txt yes; sitemap none found" \
+            in result.output
+        assert "sitemap.xml: HTTP 404" in result.output
         CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
         md = (tmp_path / "report.md").read_text()
         assert "### Hosts: robots.txt, llms.txt and sitemaps" in md and "(blocked: GPTBot)" in md
@@ -275,3 +276,78 @@ def test_ups_health_home():
 
     c = load_config(Path(__file__).parent.parent / "configs" / "ups.yaml")
     assert c.health.home_url == "https://www.ups.com/us/en/home"
+
+
+def test_empty_h1s_are_counted_separately(tmp_path):
+    """Fix 4: a template's empty H1 next to the real one still passes the one-H1 check."""
+    from pathcrawl.extract import extract_page, h1_counts
+
+    d = extract_page("<html><body><h1> </h1><h1>Real title</h1><h2>x</h2></body></html>", W)
+    assert h1_counts(d.headings) == (1, 1)
+    assert h1_counts([(1, ""), (1, "")]) == (0, 2) and h1_counts([(2, "x")]) == (0, 0)
+
+    build_run(tmp_path)
+    s = Store(tmp_path / "crawl.db")
+    s.db.execute("UPDATE pages SET headings = ? WHERE url = ?", (json.dumps([[1, ""], [1, "Home"]]), HOME))
+    s.db.commit()
+    from pathcrawl.backfill import backfill_links
+    from pathcrawl.config import load_config
+
+    backfill_links(s, load_config(tmp_path / "config.yaml").scope)
+    assert tuple(s.db.execute("SELECT h1_count, h1_empty_count FROM pages WHERE url = ?", (HOME,)).fetchone()) == (1, 1)
+    s.close()
+    CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
+    row = health_rows(tmp_path)[HOME]
+    assert (row["h1_count"], row["h1_empty_count"]) == ("1", "1")
+    md = (tmp_path / "report.md").read_text()
+    assert "| exactly one H1 with text (passes) | 2 (40%) |" in md  # home and c
+    assert "| an empty H1 (alongside or instead of a real one) | 1 (20%) |" in md
+
+
+def test_crawler_store_records_h1_counts(tmp_path):
+    s = Store(tmp_path / "crawl.db")
+    s.save_page(PageRecord(url=W, status="ok", headings=[(1, ""), (1, "A"), (1, "B")]), [])
+    assert tuple(s.db.execute("SELECT h1_count, h1_empty_count FROM pages").fetchone()) == (2, 1)
+    s.close()
+
+
+def test_unreadable_site_files_never_give_a_coverage_figure():
+    """Fix 5: an error is "could not be read", a clean 404 is "absent", and
+    coverage is only computed from a sitemap that was read."""
+    from pathcrawl.health import coverage_cell, robots_cell, sitemap_cell
+
+    crawled = [HOME, W + "us/en/a"]
+    blocked = lambda url: (403, b"")  # noqa: E731
+    h = collect_site_signals(["https://www.x.test"], blocked, crawled, lambda u: u)["www.x.test"]
+    assert (h["robots_state"], h["sitemap_state"], h["llms_state"]) == ("unreadable", "unreadable", "unreadable")
+    assert h["crawled_pages_in_sitemap"] is None and h["sitemap_urls"] is None
+    assert robots_cell(h) == "could not be read (HTTP 403)"
+    assert sitemap_cell(h).startswith("could not be read (https://www.x.test/sitemap.xml: HTTP 403")
+    assert coverage_cell(h) == "unknown (sitemap could not be read)"
+
+    down = lambda url: (None, b"", "URLError: timed out")  # noqa: E731
+    h = collect_site_signals(["https://www.x.test"], down, crawled, lambda u: u)["www.x.test"]
+    assert h["robots_detail"] == "URLError: timed out"
+
+    h = collect_site_signals(["https://www.x.test"], fake_fetch({}), crawled, lambda u: u)["www.x.test"]
+    assert (h["robots_state"], h["sitemap_state"], h["llms_state"]) == ("absent", "absent", "absent")
+    assert robots_cell(h) == "none (404)" and coverage_cell(h) == "-"
+
+    # one child sitemap read, one blocked: read, marked partial
+    files = {"https://www.x.test/robots.txt": ROBOTS.encode(), "https://www.x.test/sitemap-index.xml": INDEX.encode(),
+             "https://www.x.test/sm-1.xml.gz": gzip.compress(CHILD.encode())}
+    h = collect_site_signals(["https://www.x.test"], fake_fetch(files), crawled, lambda u: u.split("?")[0])["www.x.test"]
+    assert h["sitemap_state"] == "read" and sitemap_cell(h) == "3 URLs (partly read)"
+    assert coverage_cell(h) == "2 (100%)"
+
+
+def test_report_says_unreadable_not_zero(tmp_path):
+    build_run(tmp_path)
+    s = Store(tmp_path / "crawl.db")
+    blocked = lambda url: (403, b"")  # noqa: E731
+    s.set_meta(site_signals=collect_site_signals(["https://www.x.test"], blocked, [HOME], lambda u: u))
+    s.close()
+    CliRunner().invoke(app, ["report", "--run", str(tmp_path)])
+    md = (tmp_path / "report.md").read_text()
+    assert "unknown (sitemap could not be read)" in md and "| 0 (0%) |" not in md.split("### Hosts")[1]
+    assert "It is not the same as \"not there\"" in md

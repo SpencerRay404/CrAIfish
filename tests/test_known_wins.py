@@ -110,13 +110,23 @@ def test_report_lists_win_types_and_reasons(tmp_path):
     result = CliRunner().invoke(app, ["report", "--run", str(d)])
     assert result.exit_code == 0, result.output
     md = (d / "report.md").read_text()
-    assert f"- Win page {S}sbr-signup-ussp-page.html (White papers & reports): win page not fetched: blocked by robots.txt" in md
-    assert f"{S}unlinked-ussp-page.html (White papers & reports): win page not fetched: listed in win.known_pages" in md
+    assert (f"- Win page {S}sbr-signup-ussp-page.html (White papers & reports): matched by address, not read "
+            "(win page not fetched: blocked by robots.txt)") in md
+    assert f"{S}unlinked-ussp-page.html (White papers & reports): matched by address, not read (win page not fetched: " \
+           "listed in win.known_pages" in md
     data = json.loads((d / "report.json").read_text())
     types = {w["url"]: (w["win_type"], w["win_source"]) for w in data["win_pages"]}
     assert types[S + "virtual-consultation-us-en-v4.html"] == ("Virtual consultation", "known")
     import networkx as nx
 
+    assert "Win pages by type (crawled pages linking straight to one): consultation form: 0 pages" not in md
+    assert "Virtual consultation: 1 page, 1 linking; White papers & reports: 2 pages, 1 linking." in md
+    assert data["win_types"]["Virtual consultation"] == {"counts_as_win": True, "win_pages": 1,
+                                                         "pages_linking_directly": 1,
+                                                         "column": "clicks_to_virtual_consultation"}
+    assert data["nodes"][B + "a"]["clicks_to_virtual_consultation"] == 1
+    assert data["nodes"][B + "a"]["clicks_to_any_win"] == 1
+    assert data["nodes"][S + "unlinked-ussp-page.html"]["clicks_to_virtual_consultation"] == -1
     gx = nx.read_gexf(d / "graph.gexf")
     assert gx.nodes[S + "sbr-signup-ussp-page.html"]["win_type"] == "White papers & reports"
     assert gx.nodes[B + "a"]["win_type"] == ""
@@ -127,7 +137,10 @@ def test_ups_known_pages():
 
     c = load_config(Path(__file__).parent.parent / "configs" / "ups.yaml")
     w = c.win
-    assert len(w.known_pages) == 8 and w.match == "case_insensitive_path"
+    assert len(w.known_pages) == 10 and w.match == "case_insensitive_path"
+    for variant in ("virtual-consultation-2023-ussp-page.html", "virtual-consultation-discount-ussp-page.html?x=1"):
+        assert w.win_type("https://solutions.ups.com/" + variant) == "Virtual consultation"
+        assert not w.near_miss("https://solutions.ups.com/" + variant)
     assert w.win_type("https://solutions.ups.com/SBR-SIGNUP-USSP-PAGE.html") == "White papers & reports"
     assert w.win_type("https://solutions.ups.com/virtual-consultation-us-en-v4.html") == "Virtual consultation"
     assert not w.url_matches("https://solutions.ups.com/lpeditor/devicePreview/abc")

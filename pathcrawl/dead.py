@@ -49,13 +49,15 @@ class DeadLink:
 
 
 def dead_links(store) -> list[DeadLink]:
-    """Every link whose target (resolved through redirects) is a dead page."""
+    """Every link from a live page whose target (resolved through redirects) is
+    a dead page. Links from dead pages (their own menus and footers) are left
+    out, so the counts describe how the live site still sends people there."""
     dead = dead_pages(store)
     external = {r["url"] for r in store.db.execute("SELECT url FROM pages WHERE status = 'external'")}
     out = []
     for r in store.db.execute("SELECT src, url, text, region, mc_id FROM links WHERE url IS NOT NULL ORDER BY id"):
         target = store.resolve(r["url"])
-        if target in dead and target != r["src"]:
+        if target in dead and target != r["src"] and r["src"] not in dead:
             d = dead[target]
             out.append(DeadLink(target, d["dead_reason"] or "", d["http_status"], d["title"] or "", r["src"],
                                 r["src"] in external, r["region"] or "", r["text"] or "", r["mc_id"] or ""))

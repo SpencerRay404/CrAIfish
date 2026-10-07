@@ -270,8 +270,8 @@ def test_placeholders_only_block_the_campaign_being_crawled():
 def test_near_miss_keywords_come_from_the_patterns():
     ups = load_config(CONFIGS / "ups.yaml").win
     assert ups.keywords() == ["virtual-consultation"]
-    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-discount-ussp-page.html")
-    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-2023-ussp-page.html")
+    assert ups.near_miss("https://solutions.ups.com/virtual-consultation-2019-ussp-page.html")
+    assert not ups.near_miss("https://solutions.ups.com/virtual-consultation-2023-ussp-page.html")  # a known win now
     assert not ups.near_miss("https://solutions.ups.com/virtual-consultation-us-en-v4.html")  # a real win
     assert not ups.near_miss("https://solutions.ups.com/manufacturing-ussp-page.html")
 

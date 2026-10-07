@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
-from urllib.robotparser import RobotFileParser
 
 from rich.console import Console
 from rich.markup import escape
@@ -33,12 +32,23 @@ from rich.prompt import Prompt
 
 from pathcrawl.config import CampaignConfig, Config
 from pathcrawl.extract import detect_block, detect_dead, extract_links, extract_page, visible_text
+from pathcrawl.robots import Robots
 from pathcrawl.store import LinkRecord, PageRecord, Store
+
+ROBOTS_AGENT = "pathcrawl"  # the user-agent token robots.txt groups are matched against
 
 # --------------------------------------------------------------------------- operator
 
 BLOCKED = "blocked"
 NAV_ERROR = "navigation error"
+# Network errors a bot wall answers with instead of a 403 (Akamai on dhl.com
+# drops the HTTP/2 stream). Treated like a 403/429: back off, then stop the host.
+REFUSAL_ERRORS = (
+    "ERR_HTTP2_PROTOCOL_ERROR",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_EMPTY_RESPONSE",
+)
 OFFSITE_REDIRECT = "entry link left the allowlist"
 NO_LINKS = "no crawlable links"
 CONSENT = "consent banner"
@@ -194,7 +204,7 @@ class RobotsCache:
     def __init__(self, request_context, enabled: bool):
         self.request = request_context
         self.enabled = enabled
-        self.parsers: dict[str, RobotFileParser] = {}
+        self.parsers: dict[str, Robots] = {}
 
     def allowed(self, url: str) -> bool:
         if not self.enabled:
@@ -202,19 +212,18 @@ class RobotsCache:
         scheme = url.split("://", 1)[0]
         origin = f"{scheme}://{url.split('://', 1)[1].split('/', 1)[0]}"
         if origin not in self.parsers:
-            parser = RobotFileParser()
             try:
                 resp = self.request.get(origin + "/robots.txt", timeout=15000)
                 if resp.status in (401, 403):
-                    parser.disallow_all = True
+                    parser = Robots(disallow_all=True)
                 elif resp.status >= 400:
-                    parser.allow_all = True
+                    parser = Robots(allow_all=True)
                 else:
-                    parser.parse(resp.text().splitlines())
+                    parser = Robots(resp.text())
             except Exception:
-                parser.allow_all = True  # unreachable robots.txt: treat as no rules
+                parser = Robots(allow_all=True)  # unreachable robots.txt: treat as no rules
             self.parsers[origin] = parser
-        return self.parsers[origin].can_fetch("pathcrawl", url)
+        return self.parsers[origin].allowed(ROBOTS_AGENT, url)
 
 
 # --------------------------------------------------------------------------- crawler
@@ -244,6 +253,8 @@ class Crawler:
         self.console = console or Console()
         self.headed = config.crawl.headed if headed is None else headed
         self.store = Store(self.run_dir / "crawl.db")
+        self.host_refusals: dict[str, int] = {}
+        self.blocked_hosts: set[str] = set(self.store.meta("blocked_hosts", []) or [])
         self.screens = self.run_dir / "screenshots"
         self.scope = config.scope
 
@@ -365,11 +376,54 @@ class Crawler:
         try:
             crawled = [r["url"] for r in self.store.db.execute(
                 "SELECT url FROM pages WHERE status IN ('ok', 'http_error')")]
-            signals = collect_site_signals(site_bases(crawled, self.scope.allowed_domains), playwright_fetch(request), crawled, self.scope.normalize,
-                                           self.config.health.ai_crawlers or None)
+            signals = collect_site_signals(site_bases(crawled, self.scope.allowed_domains), playwright_fetch(request),
+                                           crawled, self.scope.normalize, self.config.health.ai_crawlers or None,
+                                           self.scope.in_scope)
             self.store.set_meta(site_signals=signals)
         except Exception as e:  # never lose a finished crawl over this
             self.console.print(f"[yellow]Site files not checked: {escape(str(e).splitlines()[0] if str(e) else '')}[/]")
+        try:
+            self.store.set_meta(win_checks=self._win_checks(request))
+        except Exception as e:
+            self.console.print(f"[yellow]Win URLs not checked: {escape(str(e).splitlines()[0] if str(e) else '')}[/]")
+
+    WIN_CHECK_LIMIT = 100
+
+    def _win_checks(self, request) -> dict[str, dict]:
+        """Confirm each win URL a crawled page links to answers, without
+        loading it as a page: one request per URL on an allowed domain that
+        robots.txt permits. Destinations off the allowed domains and URLs
+        robots.txt forbids are recorded, not fetched."""
+        win = self.config.win
+        targets: dict[str, int] = {}
+        for r in self.store.db.execute("SELECT DISTINCT src, url FROM links WHERE url IS NOT NULL"):
+            target = self.store.resolve(r["url"])
+            if win.destination(target):
+                targets[target] = targets.get(target, 0) + 1
+        out = {}
+        for url in sorted(targets)[: self.WIN_CHECK_LIMIT]:
+            cls = win.win_class(url)
+            entry = {"linked_from": targets[url], "class": cls.name if cls else win.win_type(url),
+                     "counts_as_win": win.url_matches(url)}
+            if not self.scope.domain_allowed(url):
+                entry["check"] = "destination only (off the allowed domains, not fetched)"
+            elif not self.robots.allowed(url):
+                entry["check"] = "not checked: robots.txt disallows it"
+            else:
+                try:
+                    resp = request.get(url, timeout=self.config.crawl.page_timeout_ms, max_redirects=5)
+                    entry["check"] = f"HTTP {resp.status}"
+                    entry["ok"] = resp.ok
+                    final = self.scope.normalize(resp.url) if resp.url else None
+                    if final and final != url:
+                        entry["redirects_to"] = final
+                except Exception as e:
+                    entry["check"] = f"error: {(str(e).splitlines() or ['?'])[0][:120]}"
+                    entry["ok"] = False
+                if self.config.crawl.delay_ms:
+                    time.sleep(self.config.crawl.delay_ms / 1000)
+            out[url] = entry
+        return out
 
     def _resume_hint(self, what: str) -> None:
         self.console.print(f"[yellow]{what} Resume with: pathcrawl crawl --resume {escape(str(self.run_dir))}[/]")
@@ -461,25 +515,39 @@ class Crawler:
             html=page.content(),
         )
 
-    def _dismiss_consent(self, page) -> bool:
+    def _dismiss_consent(self, page, wait_ms: int = 5000) -> bool:
         """Click a known consent button if one is showing. Returns False if a
-        known banner is still visible afterwards."""
-        for sel in CONSENT_BUTTONS:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible():
-                    btn.click(timeout=3000)
-                    page.wait_for_timeout(500)
-                    break
-            except Exception:
-                continue
+        known banner is still visible afterwards.
+
+        Banners slide in and fade out, so a button may not be clickable yet and
+        a clicked banner may take a moment to go. While a banner is showing,
+        keep trying for up to ``wait_ms``; a page with no banner costs nothing.
+        """
+        deadline = time.monotonic() + wait_ms / 1000
+        while True:
+            for sel in CONSENT_BUTTONS:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible():
+                        btn.click(timeout=3000)
+                        break
+                except Exception:
+                    continue
+            if not self._banner_showing(page):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(250)
+
+    @staticmethod
+    def _banner_showing(page) -> bool:
         for sel in CONSENT_BANNERS:
             try:
                 if page.locator(sel).first.is_visible():
-                    return False
+                    return True
             except Exception:
                 continue
-        return True
+        return False
 
     def _describe_download(self, url: str) -> str:
         """What the server sent instead of a page, as evidence for the report."""
@@ -528,7 +596,32 @@ class Crawler:
     def _win_source(self, url: str) -> str:
         return "known" if self.config.win.known_page(url) else "pattern"
 
+    def _refused(self, url: str, depth: int, host: str, refusals: int, label, reason: str) -> str:
+        """A page the host refused (403/429 or a dropped connection). Wait and
+        retry ("retry"); after the retries, count it against the host and stop
+        the host once it has refused ``host_block_limit`` pages in a row
+        ("blocked"); otherwise let the caller record the page ("refused")."""
+        cc = self.config.crawl
+        if cc.backoff_s and refusals < cc.backoff_retries:
+            wait = cc.backoff_s * (2 ** refusals)
+            self._log(depth, label, url, f"refused; waiting {wait:g} s before retry {refusals + 1}")
+            time.sleep(wait)
+            return "retry"
+        self.host_refusals[host] = self.host_refusals.get(host, 0) + 1
+        if self.host_refusals[host] >= cc.host_block_limit:
+            self.blocked_hosts.add(host)
+            self.store.set_meta(blocked_hosts=sorted(self.blocked_hosts))
+            self._log(depth, "blocked", url, f"{host} refused {self.host_refusals[host]} pages in a row; "
+                      "stopping that host (reported as blocked, not as a finding about the site)")
+            self._save_failed(url, depth, "host_blocked", reason)
+            return "blocked"
+        return "refused"
+
     def _process(self, url: str, depth: int) -> None:
+        host = url.split("/")[2] if "://" in url else ""
+        if host in self.blocked_hosts:
+            self._save_failed(url, depth, "host_blocked", f"{host} kept refusing requests (HTTP 403/429 or dropped connections); not fetched")
+            return
         is_entry = self.store.is_entry(url)
         # A URL matching the win patterns is a win whether or not it can be loaded.
         url_win = self.config.win.url_matches(url)
@@ -547,6 +640,7 @@ class Crawler:
             self._log(depth, "win", url, "matched by URL; not loaded, links not followed", win=True)
             return
 
+        refusals = 0  # 403/429 retries for this URL
         while True:  # retried on operator request
             try:
                 visit = self._visit_with_reset(url)
@@ -558,6 +652,14 @@ class Crawler:
                     kind, detail = DOWNLOAD, self._describe_download(url)
                 else:
                     kind, detail = NAV_ERROR, str(e).splitlines()[0]
+                    code = next((c for c in REFUSAL_ERRORS if c in detail), None)
+                    if code:
+                        outcome = self._refused(url, depth, host, refusals, code, f"refused: {code}")
+                        if outcome == "retry":
+                            refusals += 1
+                            continue
+                        if outcome == "blocked":
+                            return
                 d = self._ask(Problem(kind, url, detail, loaded=False))
                 if d.action == RETRY:
                     continue
@@ -590,6 +692,15 @@ class Crawler:
 
             data = extract_page(visit.html, final, self.config.win.form_selector)
             block = detect_block(visit.http_status, data.title, data.text)
+            if block and visit.http_status in (403, 429):
+                outcome = self._refused(url, depth, host, refusals, visit.http_status, f"blocked: {block}")
+                if outcome == "retry":
+                    refusals += 1
+                    continue
+                if outcome == "blocked":
+                    return
+            elif not block:
+                self.host_refusals[host] = 0
             if block:
                 d = self._ask(Problem(BLOCKED, url, block, loaded=False))
                 if d.action == RETRY:
@@ -607,7 +718,7 @@ class Crawler:
 
             links = [
                 LinkRecord(lk.href, lk.url, lk.text, lk.region, bool(lk.url and self.scope.in_scope(lk.url)),
-                           mc_id=lk.mc_id)
+                           mc_id=lk.mc_id, params=lk.params)
                 for lk in extract_links(visit.html, final, self.scope.strip_query_params,
                                         self.scope.region_selectors.model_dump(), self.scope.capture_params)
             ]
@@ -656,7 +767,7 @@ class Crawler:
             http_status=visit.http_status,
             load_ms=visit.load_ms,
             redirect_chain=[c for c in (self.scope.normalize(u) for u in visit.redirect_chain) if c],
-            canonical=data.canonical,
+            canonical=self.scope.normalize(data.canonical) if data.canonical else None,
             title=data.title,
             meta_description=data.meta_description,
             headings=data.headings,
@@ -678,6 +789,7 @@ class Crawler:
             og_properties=data.og_properties,
             hreflang=data.hreflang,
             robots_meta=data.robots_meta,
+            tags=data.tags,
         )
 
     def _follow_operator_url(self, src: str, depth: int, decision: Decision) -> None:

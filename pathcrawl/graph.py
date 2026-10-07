@@ -132,12 +132,13 @@ def win_nodes(g: nx.DiGraph) -> list[str]:
     return sorted(n for n, d in g.nodes(data=True) if d["win"])
 
 
-def distances_to_win(h: nx.DiGraph) -> dict[str, int]:
-    """Shortest click distance from each page to its nearest win (reverse BFS).
+def distances_to_win(h: nx.DiGraph, targets: Iterable[str] | None = None) -> dict[str, int]:
+    """Shortest click distance from each page to its nearest win (reverse BFS),
+    or to the nearest of ``targets`` when given (e.g. the wins of one type).
 
     Pages missing from the result have no path to any win.
     """
-    dist = {w: 0 for w in win_nodes(h)}
+    dist = {w: 0 for w in (win_nodes(h) if targets is None else [t for t in targets if t in h])}
     queue = deque(sorted(dist))
     while queue:
         node = queue.popleft()
@@ -502,7 +503,11 @@ def graph_from_store(store, win=None) -> tuple[nx.DiGraph, list[EntryPoint]]:
         )
     edges = []
     for row in store.links():
-        if not row["in_scope"] or not row["url"]:
+        if not row["url"]:
+            continue
+        # off-scope links are dropped, except to a conversion destination
+        # (a scheduling tool, a form host): kept as a node, never fetched
+        if not row["in_scope"] and not (win is not None and win.destination(row["url"])):
             continue
         dst = store.resolve(row["url"])
         if dst in offsite:
@@ -548,3 +553,7 @@ def mark_pattern_wins(g: nx.DiGraph, win, form_missing: Iterable[str] = ()) -> N
             d["win_type"] = "operator"
         else:
             d["win_type"] = win.win_type(n) or win.name
+    # every conversion class, including those that are not wins (self-serve, to verify)
+    for n, d in g.nodes(data=True):
+        cls = win.win_class(n)
+        d["conversion_class"] = cls.name if cls else (d["win_type"] if d["win"] else None)

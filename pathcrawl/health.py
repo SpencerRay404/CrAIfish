@@ -10,7 +10,8 @@ Per page (``<client>_site_health.csv``), for every loaded page:
   ``dead_inbound_pages`` (see ``pathcrawl.dead``).
 - ``has_title`` / ``title_duplicated`` and ``has_meta_description`` /
   ``meta_duplicated``: duplicate means the same lowercased text on more than
-  one loaded page. ``h1_count``. ``canonical_self``: the canonical URL is the
+  one loaded page. ``h1_count`` (H1s with text; the check passes at exactly
+  one) and ``h1_empty_count`` (empty H1s, reported on their own). ``canonical_self``: the canonical URL is the
   page itself (empty when there is no canonical).
 - ``structured_data_types`` (JSON-LD), ``microdata_types``, ``rdfa_types``,
   ``og_properties``, ``hreflang`` and ``robots_meta``. The last five are empty
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import math
 import json
 import re
 from collections import defaultdict, deque
@@ -38,10 +40,10 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from statistics import median
 from urllib.parse import urlsplit
-from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
 
-from pathcrawl.extract import BODY
+from pathcrawl.extract import BODY, h1_counts
+from pathcrawl.robots import Robots
 
 AI_CRAWLERS = [
     "GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User", "anthropic-ai",
@@ -70,7 +72,8 @@ class PageHealth:
     title_duplicated: bool
     has_meta_description: bool
     meta_duplicated: bool
-    h1_count: int
+    h1_count: int  # H1s with text
+    h1_empty_count: int  # H1s with no text (often a template's extra one)
     canonical_self: bool | None
     has_structured_data: bool
     structured_data_types: str
@@ -83,7 +86,8 @@ class PageHealth:
     raw_text_share: float | None
     redirect_hops: int
     carries_lead_tags: bool
-    leads_allocated: float
+    leads_allocated: int  # whole leads, rounded down (a lead is a whole record)
+    carries_leads: bool  # the page has an allocated share, even if under one lead
 
 
 def _bfs(g, start: str | None, edge_ok: Callable[[dict], bool]) -> dict[str, int]:
@@ -127,10 +131,10 @@ def page_health(run, categories, home: str | None) -> list[PageHealth]:
     tagged = {r["src"] for r in store.db.execute("SELECT DISTINCT src FROM links WHERE mc_id IS NOT NULL")}
     leads = defaultdict(float)
     for r in store.lead_attribution():
-        leads[r["src"]] += r["leads_allocated"]
+        leads[r["src"]] += r["share"] if r["share"] is not None else r["leads_allocated"]
     for r in store.db.execute("SELECT src, url FROM links WHERE url IS NOT NULL"):
         t = store.resolve(r["url"])
-        if t in dead and t != r["src"]:
+        if t in dead and t != r["src"] and r["src"] not in dead:  # live linking pages only
             dead_sources[t].add(r["src"])
 
     out = []
@@ -159,7 +163,8 @@ def page_health(run, categories, home: str | None) -> list[PageHealth]:
             title_duplicated=bool(p["title"]) and titles[p["title"].strip().lower()] > 1,
             has_meta_description=bool(p["meta_description"]),
             meta_duplicated=bool(p["meta_description"]) and metas[p["meta_description"].strip().lower()] > 1,
-            h1_count=sum(1 for level, _ in headings if level == 1),
+            h1_count=h1_counts(headings)[0],
+            h1_empty_count=h1_counts(headings)[1],
             canonical_self=None if not canonical else run.config.scope.normalize(canonical) == url,
             has_structured_data=bool(jsonld or micro or rdfa),
             structured_data_types=", ".join(jsonld),
@@ -172,7 +177,8 @@ def page_health(run, categories, home: str | None) -> list[PageHealth]:
             raw_text_share=None if raw is None or not rendered else round(raw / rendered, 3),
             redirect_hops=max(0, len(chain) - 1),
             carries_lead_tags=url in tagged,
-            leads_allocated=round(leads.get(url, 0.0), 3),
+            leads_allocated=math.floor(leads.get(url, 0.0) + 1e-9),
+            carries_leads=url in leads,
         ))
     return out
 
@@ -197,7 +203,32 @@ def health_annotations(rows: list[PageHealth]) -> dict[str, dict]:
 
 # --------------------------------------------------------------------------- per host
 
-Fetch = Callable[[str], "tuple[int | None, bytes]"]
+# A fetch returns (HTTP status or None, body) or (status, body, error text).
+Fetch = Callable[[str], tuple]
+
+READ, UNREADABLE, ABSENT = "read", "unreadable", "absent"
+
+
+def _get(fetch: Fetch, url: str) -> tuple[int | None, bytes, str]:
+    r = fetch(url)
+    status, body = r[0], r[1] or b""
+    error = r[2] if len(r) > 2 and r[2] else ""
+    return status, body, error
+
+
+def _state(status: int | None, body: bytes, error: str) -> tuple[str, str]:
+    """read / unreadable / absent, with the reason when not read. Only a clean
+    404 or 410 means "absent"; anything else that isn't a usable 200 is
+    "unreadable", so coverage can't be computed from it."""
+    if status == 200 and body.strip():
+        return READ, ""
+    if status in (404, 410):
+        return ABSENT, f"HTTP {status}"
+    if status == 200:
+        return UNREADABLE, "HTTP 200 but empty"
+    if status is None:
+        return UNREADABLE, error or "no response"
+    return UNREADABLE, f"HTTP {status}"
 
 
 def _text(body: bytes) -> str:
@@ -211,42 +242,41 @@ def _text(body: bytes) -> str:
 
 def robots_ai_rules(robots_txt: str, base: str, ai_crawlers: list[str]) -> dict[str, dict]:
     """For each AI crawler: whether robots.txt names it, and whether it may fetch the home page."""
-    named = {m.lower() for m in re.findall(r"(?im)^\s*user-agent\s*:\s*(\S+)", robots_txt)}
-    rp = RobotFileParser()
-    rp.parse(robots_txt.splitlines())
-    out = {}
-    for bot in ai_crawlers:
-        out[bot] = {
-            "named": bot.lower() in named,
-            "allowed_home": rp.can_fetch(bot, base.rstrip("/") + "/"),
-        }
-    return out
+    rp = Robots(robots_txt)
+    return {bot: {"named": rp.named(bot), "allowed_home": rp.allowed(bot, base.rstrip("/") + "/")}
+            for bot in ai_crawlers}
 
 
-def _sitemap_urls(fetch: Fetch, start: list[str], errors: list[str]) -> tuple[set[str], int]:
-    seen, urls, queue = set(), set(), deque(start)
+def _sitemap_urls(fetch: Fetch, start: list[str], errors: list[str]) -> tuple[set[str], int, list[str]]:
+    """URLs listed by the sitemaps (following indexes). Returns the URLs, the
+    number of sitemaps fetched, and the state of each one."""
+    seen, urls, queue, states = set(), set(), deque(start), []
     while queue and len(seen) < MAX_SITEMAPS and len(urls) < MAX_SITEMAP_URLS:
         sm = queue.popleft()
         if sm in seen:
             continue
         seen.add(sm)
-        status, body = fetch(sm)
-        if status != 200 or not body:
-            errors.append(f"{sm}: " + (f"HTTP {status}" if status else "no response") + (" (empty)" if status == 200 else ""))
+        status, body, error = _get(fetch, sm)
+        state, detail = _state(status, body, error)
+        if state != READ:
+            states.append(state)
+            errors.append(f"{sm}: {detail}")
             continue
         try:
             root = ElementTree.fromstring(_text(body).encode())
         except ElementTree.ParseError:
             head = _text(body)[:200].lower()
+            states.append(UNREADABLE)
             errors.append(f"{sm}: not XML" + (" (an HTML page, maybe a bot check)" if "<html" in head else ""))
             continue
+        states.append(READ)
         tag = root.tag.rsplit("}", 1)[-1]
         locs = [el.text.strip() for el in root.iter() if el.tag.rsplit("}", 1)[-1] == "loc" and el.text]
         if tag == "sitemapindex":
             queue.extend(locs)
         else:
             urls.update(locs)
-    return urls, len(seen)
+    return urls, len(seen), states
 
 
 def site_bases(crawled_urls: list[str], allowed_domains: list[str]) -> list[str]:
@@ -260,30 +290,53 @@ def site_bases(crawled_urls: list[str], allowed_domains: list[str]) -> list[str]
 
 
 def collect_site_signals(bases: list[str], fetch: Fetch, crawled_urls: list[str], normalize,
-                         ai_crawlers: list[str] | None = None) -> dict[str, dict]:
+                         ai_crawlers: list[str] | None = None, in_scope=None) -> dict[str, dict]:
     """robots.txt AI rules, llms.txt and sitemap coverage per site (``scheme://host[:port]``)."""
     ai_crawlers = ai_crawlers or AI_CRAWLERS
     out = {}
     for base in sorted(bases):
         host = urlsplit(base).netloc
         errors: list[str] = []
-        status, body = fetch(base + "/robots.txt")
-        robots = _text(body) if status == 200 else ""
+        status, body, error = _get(fetch, base + "/robots.txt")
+        robots_state, robots_detail = _state(status, body, error)
+        robots = _text(body) if robots_state == READ else ""
         sitemaps = re.findall(r"(?im)^\s*sitemap\s*:\s*(\S+)", robots) or [base + "/sitemap.xml"]
-        llms_status, llms_body = fetch(base + "/llms.txt")
-        sm_urls, sm_count = _sitemap_urls(fetch, sitemaps, errors)
+        llms_status, llms_body, llms_error = _get(fetch, base + "/llms.txt")
+        llms_state, llms_detail = _state(llms_status, llms_body, llms_error)
+        if llms_state == READ and llms_body.lstrip()[:1] == b"<":  # an HTML page served at /llms.txt
+            llms_state, llms_detail = ABSENT, "an HTML page, not llms.txt"
+        sm_urls, sm_count, sm_states = _sitemap_urls(fetch, sitemaps, errors)
+        if READ in sm_states:
+            # some listed sitemaps failed or were missing: read, but marked partial
+            sitemap_state, sitemap_detail = READ, ("partly: " + errors[0]) if any(x != READ for x in sm_states) else ""
+        elif sm_states and all(x == ABSENT for x in sm_states):
+            sitemap_state, sitemap_detail = ABSENT, errors[0] if errors else ""
+        else:
+            sitemap_state, sitemap_detail = UNREADABLE, errors[0] if errors else "no sitemap could be read"
         sm_norm = {normalize(u) for u in sm_urls} - {None}
         on_host = [u for u in crawled_urls if urlsplit(u).netloc == host]
         out[host] = {
-            "robots_txt": status == 200,
+            "robots_state": robots_state,
+            "robots_detail": robots_detail,
+            "robots_txt": robots_state == READ,
             "robots_status": status,
-            "ai_crawlers": robots_ai_rules(robots, base, ai_crawlers) if status == 200 else {},
-            "llms_txt": llms_status == 200 and bool(llms_body.strip()) and not llms_body.lstrip().startswith(b"<"),
+            "ai_crawlers": robots_ai_rules(robots, base, ai_crawlers) if robots_state == READ else {},
+            "llms_state": llms_state,
+            "llms_detail": llms_detail,
+            "llms_txt": llms_state == READ,
             "sitemaps_declared": sitemaps,
             "sitemaps_read": sm_count,
-            "sitemap_urls": len(sm_urls),
+            "sitemap_state": sitemap_state,
+            "sitemap_detail": sitemap_detail,
+            "sitemap_urls": len(sm_urls) if sitemap_state == READ else None,
             "crawled_pages": len(on_host),
-            "crawled_pages_in_sitemap": sum(1 for u in on_host if u in sm_norm),
+            # never a coverage figure from a sitemap that couldn't be read
+            "crawled_pages_in_sitemap": sum(1 for u in on_host if u in sm_norm) if sitemap_state == READ else None,
+            # in-scope URLs the sitemap lists that the link crawl never reached
+            "sitemap_not_crawled": len(missed := sorted(
+                u for u in sm_norm if urlsplit(u).netloc == host and u not in set(on_host)
+                and (in_scope is None or in_scope(u)))) if sitemap_state == READ else None,
+            "sitemap_not_crawled_sample": missed[:20] if sitemap_state == READ else [],
             "errors": errors[:10],
         }
     return out
@@ -293,15 +346,15 @@ def urllib_fetch(user_agent: str = "pathcrawl", timeout: float = 20) -> Fetch:
     import urllib.error
     import urllib.request
 
-    def fetch(url: str) -> tuple[int | None, bytes]:
+    def fetch(url: str) -> tuple[int | None, bytes, str]:
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status, r.read(20_000_000)
+                return r.status, r.read(20_000_000), ""
         except urllib.error.HTTPError as e:
-            return e.code, b""
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            return None, b""
+            return e.code, b"", ""
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            return None, b"", f"{type(e).__name__}: {e}"[:200]
 
     return fetch
 
@@ -309,17 +362,66 @@ def urllib_fetch(user_agent: str = "pathcrawl", timeout: float = 20) -> Fetch:
 def playwright_fetch(request, timeout_ms: int = 20000) -> Fetch:
     """Fetch with the crawler's browser request context (same cookies and headers)."""
 
-    def fetch(url: str) -> tuple[int | None, bytes]:
+    def fetch(url: str) -> tuple[int | None, bytes, str]:
         try:
             r = request.get(url, timeout=timeout_ms)
-            return r.status, r.body() if r.ok else b""
-        except Exception:
-            return None, b""
+            return r.status, r.body() if r.ok else b"", ""
+        except Exception as e:
+            return None, b"", (str(e).splitlines() or [type(e).__name__])[0][:200]
 
     return fetch
 
 
 # --------------------------------------------------------------------------- report
+
+
+def site_state(h: dict, kind: str) -> str:
+    """read / unreadable / absent for robots, sitemap or llms (older runs: inferred)."""
+    if f"{kind}_state" in h:
+        return h[f"{kind}_state"]
+    if kind == "robots":
+        return READ if h.get("robots_txt") else ABSENT if h.get("robots_status") in (404, 410) else UNREADABLE
+    if kind == "llms":
+        return READ if h.get("llms_txt") else ABSENT
+    return READ if h.get("sitemaps_read") and h.get("sitemap_urls") else UNREADABLE
+
+
+def robots_cell(h: dict) -> str:
+    state = site_state(h, "robots")
+    if state == READ:
+        return "read"
+    if state == ABSENT:
+        return "none (404)"
+    return f"could not be read ({h.get('robots_detail') or 'HTTP ' + str(h.get('robots_status'))})"
+
+
+def ai_cell(h: dict) -> str:
+    if site_state(h, "robots") != READ:
+        return "unknown"
+    bots = h.get("ai_crawlers", {})
+    named = [b for b, v in bots.items() if v["named"]]
+    blocked = [b for b, v in bots.items() if not v["allowed_home"]]
+    return f"{len(named)} / {len(blocked)}" + (f" (blocked: {', '.join(blocked[:6])})" if blocked else "")
+
+
+def llms_cell(h: dict) -> str:
+    state = site_state(h, "llms")
+    return {"read": "yes", "absent": "no"}.get(state, f"could not be read ({h.get('llms_detail', '')})")
+
+
+def sitemap_cell(h: dict) -> str:
+    state = site_state(h, "sitemap")
+    if state == READ:
+        return f"{h['sitemap_urls']} URLs" + (" (partly read)" if h.get("sitemap_detail") else "")
+    if state == ABSENT:
+        return "none found"
+    return f"could not be read ({h.get('sitemap_detail') or 'error'})"
+
+
+def coverage_cell(h: dict) -> str:
+    if site_state(h, "sitemap") != READ or h.get("crawled_pages_in_sitemap") is None:
+        return "unknown (sitemap could not be read)" if site_state(h, "sitemap") == UNREADABLE else "-"
+    return _pct(h["crawled_pages_in_sitemap"], h["crawled_pages"])
 
 
 def _pct(n: int, d: int) -> str:
@@ -339,8 +441,10 @@ def _summary(rows: list[PageHealth]) -> dict:
         "title_duplicated": sum(r.title_duplicated for r in rows),
         "missing_meta_description": sum(not r.has_meta_description for r in rows),
         "meta_duplicated": sum(r.meta_duplicated for r in rows),
+        "h1_one": sum(r.h1_count == 1 for r in rows),
         "h1_missing": sum(r.h1_count == 0 for r in rows),
         "h1_multiple": sum(r.h1_count > 1 for r in rows),
+        "h1_empty": sum(r.h1_empty_count > 0 for r in rows),
         "canonical_missing": sum(r.canonical_self is None for r in rows),
         "canonical_elsewhere": sum(r.canonical_self is False for r in rows),
         "redirected": sum(r.redirect_hops > 0 for r in rows),
@@ -383,8 +487,10 @@ def health_section(rows: list[PageHealth], home: str | None, site: dict, short,
         ("duplicated title", s["title_duplicated"]),
         ("missing meta description", s["missing_meta_description"]),
         ("duplicated meta description", s["meta_duplicated"]),
-        ("no H1", s["h1_missing"]),
-        ("more than one H1", s["h1_multiple"]),
+        ("exactly one H1 with text (passes)", s["h1_one"]),
+        ("no H1 with text", s["h1_missing"]),
+        ("more than one H1 with text", s["h1_multiple"]),
+        ("an empty H1 (alongside or instead of a real one)", s["h1_empty"]),
         ("no canonical URL", s["canonical_missing"]),
         ("canonical points elsewhere", s["canonical_elsewhere"]),
         ("reached through a redirect", s["redirected"]),
@@ -405,7 +511,7 @@ def health_section(rows: list[PageHealth], home: str | None, site: dict, short,
                  "(crawled before they were added); a new crawl records them.")
         L.append("")
 
-    lead_rows = [r for r in rows if r.leads_allocated > 0]
+    lead_rows = [r for r in rows if r.carries_leads]
     groups = [("section", "By section"), ("page_type", "By page type")]
     for key, title in groups:
         L.append(f"### {title}")
@@ -431,17 +537,17 @@ def health_section(rows: list[PageHealth], home: str | None, site: dict, short,
     if site:
         L.append("### Hosts: robots.txt, llms.txt and sitemaps")
         L.append("")
-        L.append("| host | robots.txt | AI crawlers named / blocked from home | llms.txt | sitemap URLs | crawled pages in sitemap |")
+        L.append("| host | robots.txt | AI crawlers named / blocked from home | llms.txt | sitemap | crawled pages in sitemap |")
         L.append("|---|---|---|---|---|---|")
         for host, h in sorted(site.items()):
-            bots = h.get("ai_crawlers", {})
-            named = [b for b, v in bots.items() if v["named"]]
-            blocked = [b for b, v in bots.items() if not v["allowed_home"]]
-            L.append(f"| {host} | {'yes' if h['robots_txt'] else 'HTTP ' + str(h['robots_status'])} | "
-                     f"{len(named)} / {len(blocked)}" + (f" (blocked: {', '.join(blocked[:6])})" if blocked else "")
-                     + f" | {'yes' if h['llms_txt'] else 'no'} | {h['sitemap_urls']} | "
-                     f"{_pct(h['crawled_pages_in_sitemap'], h['crawled_pages'])} |")
+            L.append(f"| {host} | {robots_cell(h)} | {ai_cell(h)} | {llms_cell(h)} | {sitemap_cell(h)} | {coverage_cell(h)} |")
         L.append("")
+        unreadable = [h for h, v in site.items() if site_state(v, "sitemap") == UNREADABLE
+                      or site_state(v, "robots") == UNREADABLE]
+        if unreadable:
+            L.append("Unreadable means the file exists or should, but the request failed (an HTTP error, a block or "
+                     "no response); what it would say is unknown. It is not the same as \"not there\".")
+            L.append("")
     else:
         L.append("robots.txt, llms.txt and sitemap coverage have not been checked for this run: "
                  "run `pathcrawl site-signals --run <run dir>`.")

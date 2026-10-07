@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pathcrawl.extract import h1_counts
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS entries (
@@ -97,7 +99,31 @@ CREATE TABLE IF NOT EXISTS lead_attribution (
     tag_leads_total REAL NOT NULL,
     tag_source_pages INTEGER NOT NULL,
     leads_allocated REAL NOT NULL,
-    attribution TEXT NOT NULL         -- exact (one source page) or shared
+    attribution TEXT NOT NULL,        -- exact (one source page) or shared
+    share REAL,                       -- full-precision share of the tag's leads (audit)
+    leads_whole INTEGER               -- floor(share): the number shown to readers
+);
+CREATE TABLE IF NOT EXISTS page_tags (
+    url TEXT PRIMARY KEY,
+    source TEXT NOT NULL,             -- crawl (read from the page) or backfill (rebuilt from stored data)
+    title TEXT,
+    meta_description TEXT,
+    h1 TEXT,
+    url_path_segments TEXT,           -- JSON list
+    breadcrumb TEXT,                  -- JSON list (BreadcrumbList JSON-LD, else the visible breadcrumb)
+    schema_types TEXT,                -- JSON list: JSON-LD, Microdata and RDFa types
+    og_type TEXT,
+    article_tags TEXT,                -- JSON list
+    meta_keywords TEXT,               -- JSON list
+    service_entities TEXT,            -- JSON list: names under Service, Product, Offer, FAQPage
+    nav_labels TEXT                   -- JSON list of [parent label, label]
+);
+CREATE TABLE IF NOT EXISTS page_topics (
+    url TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    field TEXT NOT NULL,              -- title, h1, breadcrumb, nav_label or url_path
+    rule TEXT NOT NULL,               -- the taxonomy term that matched
+    PRIMARY KEY (url, topic)
 );
 CREATE TABLE IF NOT EXISTS page_entities (
     url TEXT NOT NULL,
@@ -113,6 +139,7 @@ CREATE TABLE IF NOT EXISTS page_entities (
 # upgraded in place when opened: (table, column, SQL type).
 MIGRATIONS = [
     ("links", "mc_id", "TEXT"),
+    ("links", "params", "TEXT"),              # JSON {name: value} of every captured param (scope.capture_params)
     ("pages", "channel", "TEXT"),             # external seeds: e.g. linkedin
     ("pages", "post_date_derived", "TEXT"),   # external seeds: date from the post ID
     ("pages", "is_dead", "INTEGER"),          # 404/410 or a soft 404 (pathcrawl.extract.detect_dead)
@@ -123,6 +150,12 @@ MIGRATIONS = [
     ("pages", "og_properties", "TEXT"),       # JSON list
     ("pages", "hreflang", "TEXT"),            # JSON list
     ("pages", "robots_meta", "TEXT"),
+    ("pages", "h1_count", "INTEGER"),         # H1s with text
+    ("pages", "h1_empty_count", "INTEGER"),   # H1s with no text
+    ("pages", "section", "TEXT"),             # first path segment after the locale (pathcrawl.categorize)
+    ("pages", "page_type", "TEXT"),
+    ("lead_attribution", "share", "REAL"),
+    ("lead_attribution", "leads_whole", "INTEGER"),
 ]
 
 # Page statuses whose outbound links are known ("explored" in graph terms).
@@ -163,6 +196,9 @@ class PageRecord:
     og_properties: list[str] | None = None
     hreflang: list[str] | None = None
     robots_meta: str | None = None
+    h1_count: int | None = None
+    h1_empty_count: int | None = None
+    tags: dict | None = None  # page_tags fields (extract.page_tags)
 
 
 @dataclass
@@ -174,6 +210,7 @@ class LinkRecord:
     in_scope: bool
     operator: bool = False
     mc_id: str | None = None
+    params: dict[str, str] | None = None
 
 
 @dataclass
@@ -281,8 +318,8 @@ class Store:
                    redirect_chain, canonical, title, meta_description, headings, body_text, form_present,
                    jsonld_types, raw_text_len, rendered_text_len, js_dependent, screenshot, win, win_source,
                    error, crawled_at, is_dead, dead_reason, microdata_types, rdfa_types, og_properties,
-                   hreflang, robots_meta)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   hreflang, robots_meta, h1_count, h1_empty_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     page.url, page.requested_url, page.status, page.depth, page.http_status, page.load_ms,
                     json.dumps(page.redirect_chain), page.canonical, page.title, page.meta_description,
@@ -296,12 +333,17 @@ class Store:
                     *(None if v is None else json.dumps(v)
                       for v in (page.microdata_types, page.rdfa_types, page.og_properties, page.hreflang)),
                     page.robots_meta,
+                    *((None, None) if page.headings is None else h1_counts(page.headings)),
                 ),
             )
+            if page.tags is not None:
+                self.save_page_tags(page.url, "crawl", page.title, page.meta_description, page.tags)
             self.db.execute("DELETE FROM links WHERE src = ? AND operator = 0", (page.url,))
             self.db.executemany(
-                "INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator), lk.mc_id)
+                """INSERT INTO links(src, href, url, text, region, in_scope, operator, mc_id, params)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(page.url, lk.href, lk.url, lk.text, lk.region, int(lk.in_scope), int(lk.operator), lk.mc_id,
+                  json.dumps(lk.params) if lk.params else None)
                  for lk in links],
             )
             for alias in {page.url, page.requested_url, *page.redirect_chain} - {None}:
@@ -379,12 +421,53 @@ class Store:
             self.db.execute("DELETE FROM lead_attribution")
             self.db.executemany(
                 """INSERT INTO lead_attribution(src, mc_id, lead_tag, join_type, targets, region, tag_leads_total,
-                   tag_source_pages, leads_allocated, attribution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   tag_source_pages, leads_allocated, attribution, share, leads_whole)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(r.src, r.mc_id, r.lead_tag, r.join, r.targets, r.region, r.tag_leads_total, r.tag_source_pages,
-                  r.leads_allocated, r.attribution) for r in rows],
+                  r.leads_allocated, r.attribution, r.share, r.leads_whole) for r in rows],
             )
 
     def lead_attribution(self) -> list[sqlite3.Row]:
         return self.db.execute(
             "SELECT * FROM lead_attribution ORDER BY leads_allocated DESC, src, mc_id"
         ).fetchall()
+
+    def set_categories(self, rows) -> None:
+        """Store each page's section and page type (from ``categorize``) so
+        anything reading crawl.db can group pages the same way the report does."""
+        with self.db:
+            self.db.executemany("UPDATE pages SET section = ?, page_type = ? WHERE url = ?",
+                                [(r.section, r.page_type, r.url) for r in rows])
+
+    # ------------------------------------------------------------------ page tags and topics
+
+    TAG_LISTS = ("url_path_segments", "breadcrumb", "schema_types", "article_tags", "meta_keywords",
+                 "service_entities", "nav_labels")
+
+    def save_page_tags(self, url: str, source: str, title, meta_description, tags: dict) -> None:
+        self.db.execute(
+            """INSERT OR REPLACE INTO page_tags(url, source, title, meta_description, h1, url_path_segments,
+               breadcrumb, schema_types, og_type, article_tags, meta_keywords, service_entities, nav_labels)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (url, source, title, meta_description, tags.get("h1"),
+             *(None if tags.get(k) is None else json.dumps(tags[k]) for k in self.TAG_LISTS[:3]),
+             tags.get("og_type"),
+             *(None if tags.get(k) is None else json.dumps(tags[k]) for k in self.TAG_LISTS[3:])),
+        )
+
+    def page_tags(self) -> dict[str, dict]:
+        out = {}
+        for r in self.db.execute("SELECT * FROM page_tags"):
+            d = dict(r)
+            for k in self.TAG_LISTS:
+                d[k] = json.loads(d[k]) if d[k] else []
+            out[d["url"]] = d
+        return out
+
+    def replace_page_topics(self, rows) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM page_topics")
+            self.db.executemany("INSERT OR REPLACE INTO page_topics(url, topic, field, rule) VALUES (?, ?, ?, ?)", rows)
+
+    def page_topics(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM page_topics ORDER BY url, topic").fetchall()

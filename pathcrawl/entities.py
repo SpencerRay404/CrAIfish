@@ -100,6 +100,9 @@ class LLM(_Strict):
 
 
 class Taxonomy(_Strict):
+    # A label for a frozen rule set (e.g. "2026-10-03"); the topic tagger
+    # records it, with the file's hash, so compared sites provably used the same rules.
+    version: str | None = None
     types: list[str] = Field(default_factory=lambda: list(ENTITY_TYPES))
     boilerplate: Boilerplate = Boilerplate()
     scoring: Scoring = Scoring()
